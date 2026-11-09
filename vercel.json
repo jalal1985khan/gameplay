@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "cloud": {
+      "root": "cloud",
+      "framework": "nextjs"
+    },
+    "monitor": {
+      "root": "monitor",
+      "runtime": "node"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "cloud"
+      }
+    }
+  ]
+}

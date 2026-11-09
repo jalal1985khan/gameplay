@@ -4,10 +4,6 @@
     "cloud": {
       "root": "cloud",
       "framework": "nextjs"
-    },
-    "monitor": {
-      "root": "monitor",
-      "runtime": "node"
     }
   },
   "rewrites": [
@@ -19,4 +15,3 @@
     }
   ]
 }
-

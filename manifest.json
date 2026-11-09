@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Aviator Live History Analyzer",
+  "version": "1.5.0",
+  "description": "Accurate Aviator round capture with honest odds, randomness checks, a strategy tester, risk tools and optional cloud sync. Does not predict rounds.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Aviator Live History Analyzer"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Next.js build output
+.next/
+*/.next/
+next-env.d.ts
+*/next-env.d.ts
+
+# Environment variables & secrets
+.env*
+!.env.example
+*/.env*
+!*/.env.example
+
+# Runtime browser profile and captured session databases
+browser-profile/
+*/browser-profile/
+data/
+*/data/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+*/*.tsbuildinfo

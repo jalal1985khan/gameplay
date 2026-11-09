@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aviator Live History Analyzer</title><link rel="stylesheet" href="popup.css"></head>
+<body><main>
+<header><div class="mark">✈</div><div><h1>Aviator Live History Analyzer</h1><p>SPRIBE · accurate round capture · honest odds</p></div></header>
+<div class="notice"><strong>No tool can predict the next round.</strong> Every round is independent, and over time the game keeps about 3% of every bet whatever you do. This extension records rounds accurately and shows the real odds and costs.</div>
+<section class="panel">
+<label for="siteUrl">Game website URL (user-configured)</label>
+<input id="siteUrl" type="url" placeholder="https://your-betting-site.example" autocomplete="off">
+<p class="hint">Open the game in the active tab, enter its URL here, then start capture. No login or wallet access is requested.</p>
+<div class="actions"><button id="saveUrl" class="secondary">Save URL</button><button id="start">Start live capture</button></div>
+<div class="actions"><button id="stop" class="secondary">Stop capture</button><button id="clearLive" class="secondary">Clear history</button></div>
+<div id="captureHealth" class="health" aria-live="polite">Capture stopped.</div>
+<div id="liveStatus" class="status" aria-live="polite"></div>
+</section>
+<details class="panel" id="cloudPanel">
+<summary>Cloud sync <span id="cloudBadge" class="hint">off</span></summary>
+<p class="hint">Optional. Sends captured rounds (multiplier, time, game site address) to your own Aviator Cloud Tracker so you can watch them live from any device. Nothing else is sent. Off until you save a server and key.</p>
+<label for="cloudUrl">Server address</label>
+<input id="cloudUrl" type="url" placeholder="https://your-tracker.example" autocomplete="off">
+<label for="cloudKey">Tracker key</label>
+<input id="cloudKey" type="password" placeholder="avk_…" autocomplete="off">
+<div class="actions"><button id="cloudSave">Save cloud settings</button><button id="cloudOff" class="secondary">Turn off</button></div>
+<div id="cloudStatus" class="health" aria-live="polite">Cloud sync is off.</div>
+</details>
+<section id="liveSection">
+<div class="stats"><article><span>Captured rounds</span><strong id="count">0</strong></article><article><span>Median</span><strong id="median">—</strong></article><article><span>Latest</span><strong id="latest">—</strong></article><article><span>≥ 2×</span><strong id="over2">—</strong></article></div>
+<p id="quality" class="hint quality"></p>
+<h2>Probability panel</h2>
+<div class="panel">
+<label>Cash-out target</label>
+<div class="targets" id="targets" role="radiogroup"><button data-t="1.5">1.5×</button><button data-t="2" class="on">2×</button><button data-t="3">3×</button><button data-t="5">5×</button><button data-t="10">10×</button></div>
+<div id="baseRate" class="empty">Capture some rounds to see the odds.</div>
+<h3>Trend checks: does history change the odds?</h3>
+<div id="trends" class="trends"></div>
+<h3>Randomness checks: is there any pattern at all?</h3>
+<div id="randomness" class="trends"></div>
+<p class="hint">A result only counts as notable if it's well beyond random noise (|z| ≥ 2.6, at least 30 cases). Even then, confirm it on fresh data before trusting it: with eight checks, a fluke will eventually look notable. Checks never look across missed rounds.</p>
+</div>
+<h2>Decision check: your plan</h2>
+<div class="panel">
+<div class="grid2">
+<label>Bet per round (₹)<input id="planBet" type="number" min="1" step="1" value="100"></label>
+<label>Cash out at (×)<input id="planTarget" type="number" min="1.01" step="0.01" value="2"></label>
+<label>Rounds to play<input id="planRounds" type="number" min="1" max="2000" step="1" value="50"></label>
+<label>Session budget (₹)<input id="planBudget" type="number" min="1" step="1" value="2000"></label>
+</div>
+<button id="checkPlan" class="full">Check this plan</button>
+<div id="planResult" class="plan"></div>
+<p class="hint">Simulates 5,000 sessions using the game's built-in odds (97% return). The budget is also your loss limit in the bet log below.</p>
+</div>
+<h2>Strategy tester</h2>
+<div class="panel">
+<label for="strategyText">Describe a strategy in plain words</label>
+<textarea id="strategyText" placeholder="e.g. Bet ₹100 at 2x after 3 rounds under 2x, double after a loss, stop loss 1000"></textarea>
+<div class="presets" id="strategyPresets">
+<button class="secondary" data-s="Flat bet ₹100 at 2x for 100 rounds">Flat bet</button>
+<button class="secondary" data-s="Martingale: bet ₹10 at 2x, budget 2000">Martingale</button>
+<button class="secondary" data-s="Reverse martingale: bet ₹20 at 2x">Paroli</button>
+<button class="secondary" data-s="D'Alembert at 2x, bet ₹20">D'Alembert</button>
+<button class="secondary" data-s="Wait for 3 rounds under 2x, then bet ₹100 at 2x">After lows</button>
+<button class="secondary" data-s="Bet ₹100 at 1.2x, stop when up 300, stop loss 1000">Low cash-out</button>
+</div>
+<button id="testStrategy" class="full">Test this strategy</button>
+<div id="strategyResult" class="plan"></div>
+<p class="hint">Understands bets, cash-out targets, budgets, rounds, stop-loss and take-profit, "double / triple / raise by ₹X / by X% after a loss or win", Martingale, Paroli, D'Alembert, and betting only after low or high rounds. Plays it on your captured history and on 2,000 simulated sessions with the game's real odds.</p>
+</div>
+<h2>Bet log: this session</h2>
+<div class="panel">
+<div class="grid2">
+<label>Bet (₹)<input id="logBet" type="number" min="1" step="1"></label>
+<label>Cashed out at (×, blank = lost)<input id="logCashout" type="number" min="1" step="0.01"></label>
+</div>
+<div class="actions"><button id="logAdd">Log round</button><button id="logReset" class="secondary">New session</button></div>
+<div id="logWarnings"></div>
+<div id="logSummary" class="stats three"></div>
+<div id="logList" class="recent"></div>
+</div>
+<h2>Live history (newest first)</h2><div id="liveHistory" class="recent empty">No values captured yet.</div>
+<p class="hint">Reads the game's results list from the page, including the game iframe. Games drawn only on a canvas cannot be read. Missed rounds are marked, never filled in.</p>
+<button id="export" class="secondary full">Export captured history as CSV</button>
+</section>
+<footer>Local storage only unless Cloud sync is on · No betting-site credentials</footer>
+</main><script src="stats.js"></script><script src="strategy.js"></script><script src="popup.js"></script></body></html>

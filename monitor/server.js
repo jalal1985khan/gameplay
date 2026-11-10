@@ -858,7 +858,7 @@ function createMonitor({
 
   // Clicks .betButton ('bet', 'cancel', 'cashout') or .autoPlayButton ('autoplay') on one slot,
   // checking live game state and session limits, then reads back what the game shows afterwards.
-  async function clickGame({slot = 0, action = 'bet', on} = {}) {
+  async function clickGame({slot = 0, action = 'bet', on, rounds} = {}) {
     const fail = error => ({ok: false, error});
     slot = Number(slot);
     const rawAction = String(action === undefined || action === null ? 'bet' : action).trim().toLowerCase().replace(/[\s_-]+/g, '');
@@ -869,6 +869,7 @@ function createMonitor({
       : null;
     if (!kind) return fail('Choose an action: bet, cancel, cashout, or autoplay.');
     if (kind === 'autoplay' && on !== undefined && typeof on !== 'boolean') return fail('Set "on" to true or false for autoplay.');
+    if (rounds !== undefined && rounds !== null && !(Number.isInteger(rounds) && rounds > 0 && rounds <= 10000)) return fail('Choose a whole number of rounds.');
     if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
     if (!Number.isInteger(slot) || slot < 0) return fail("The game's bet panel is not on screen.");
     if (busy) return fail('Another game action is still running. Try again in a moment.');
@@ -882,10 +883,13 @@ function createMonitor({
       const st = sessionState();
       const block = frame.locator('.betSectionBlock').nth(slot);
 
-      let targetLocator, done, mismatchError;
+      let targetLocator, done, mismatchError, wantOn = false;
+      // Some games answer the Auto Play button with an options box (number of rounds, Start).
+      const optionsTitle = frame.getByText(/^\s*auto ?play options\s*$/i).first();
+      const optionsOpen = () => optionsTitle.isVisible().catch(() => false);
       if (kind === 'autoplay') {
         if (!before.hasAutoPlay) return fail('The Auto Play button was not found on this slot.');
-        const wantOn = on !== undefined ? on : !before.autoPlay;
+        wantOn = on !== undefined ? on : !before.autoPlay;
         if (wantOn) {
           if (st.stopped) return fail('Stop-loss reached. You are done for today.');
           if (!(before.bet > 0)) return fail('Enter a bet above ₹0 in the game first.');
@@ -932,9 +936,33 @@ function createMonitor({
         const s = (await readFramePanel(frame)).slots[slot];
         return !!s && (kind === 'autoplay' ? s.autoPlay === before.autoPlay : s.button === kind);
       };
-      const clicked = await clickControl(targetLocator, {still, fallback: false});
-      if (!clicked.ok) return fail(clicked.changed ? `Nothing was pressed: ${clicked.why}. Check the game window.` : `The game's ${kind} button could not be clicked (${clicked.why}).`);
-      const afterPanel = await waitForPanelSlot(frame, slot, done, 450);
+      // An options box left open from an earlier press covers the button: carry on from the box.
+      const boxWasOpen = wantOn && await optionsOpen();
+      if (!boxWasOpen) {
+        const clicked = await clickControl(targetLocator, {still, fallback: false});
+        if (!clicked.ok) return fail(clicked.changed ? `Nothing was pressed: ${clicked.why}. Check the game window.` : `The game's ${kind} button could not be clicked (${clicked.why}).`);
+      }
+      let wait = 450;
+      if (wantOn) {
+        let box = boxWasOpen;
+        for (const end = Date.now() + 1500; !box && Date.now() < end;) {
+          if (done((await readFramePanel(frame)).slots[slot])) break;
+          box = await optionsOpen();
+          if (!box) await new Promise(r => setTimeout(r, 80));
+        }
+        if (box) {
+          const panelBox = optionsTitle.locator('xpath=ancestor::*[.//*[normalize-space(text())="Start"]][1]');
+          if (rounds) {
+            const pick = panelBox.getByText(String(rounds), {exact: true}).first();
+            if (!await pick.count().catch(() => 0)) return fail(`The game does not offer ${rounds} rounds in its Auto Play options. Nothing was started; the options box is open in the game window.`);
+            await pick.click({timeout: 1500});
+          }
+          await panelBox.getByText('Start', {exact: true}).last().click({timeout: 1500});
+          wait = 2500;
+          mismatchError = () => "Start was pressed in the game's Auto Play options, but Auto Play does not show as ON yet. Check the game window.";
+        }
+      }
+      const afterPanel = await waitForPanelSlot(frame, slot, done, wait);
       applyPanelFromFrame(afterPanel);
       const after = afterPanel.slots[slot];
       if (!done(after)) return {ok: false, slot, action: kind, shown: slotView(after), error: mismatchError(after)};

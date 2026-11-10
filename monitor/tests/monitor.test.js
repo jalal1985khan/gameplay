@@ -555,6 +555,19 @@ const wireButtons = gameFrame => gameFrame.evaluate(() => {
     }
   });
   playBtn.addEventListener('click', () => {
+    // Like the real game when window.withOptions is set: switching on first shows an options box.
+    if (window.withOptions && !playBtn.classList.contains('active')) {
+      if (document.getElementById('opts')) return;
+      const box = document.createElement('div');
+      box.id = 'opts';
+      box.innerHTML = '<div><span>Auto Play Options</span></div><div><button>10</button><button>40</button></div><div><button>Reset</button><button id="go">Start</button></div>';
+      document.body.append(box);
+      box.querySelectorAll('button').forEach(b => { b.onclick = () => {
+        if (b.id === 'go') { playBtn.classList.add('active'); playBtn.textContent = 'stop'; box.remove(); }
+        else if (b.textContent !== 'Reset') window.picked = b.textContent;
+      }; });
+      return;
+    }
     const on = playBtn.classList.toggle('active');
     playBtn.textContent = on ? 'stop' : 'auto play';
   });
@@ -618,6 +631,19 @@ test('clicks .betButton and .autoPlayButton via /api/game/click with safety chec
   const autoOff = await click({slot: 0, action: 'autoplay'});
   assert.equal(autoOff.ok, true);
   assert.equal(autoOff.shown.autoPlay, false);
+
+  // A game that answers Auto Play with an options box: the rounds are picked and Start is pressed.
+  await gameFrame.evaluate(() => { window.withOptions = true; });
+  assert.match((await click({slot: 0, action: 'autoplay', on: true, rounds: 77})).error, /does not offer 77 rounds/);
+  const viaBox = await click({slot: 0, action: 'autoplay', on: true, rounds: 40}); // The box is still open.
+  assert.equal(viaBox.ok, true, viaBox.error);
+  assert.equal(viaBox.shown.autoPlay, true);
+  assert.equal(await gameFrame.evaluate(() => window.picked), '40');
+  assert.equal((await click({slot: 0, action: 'autoplay', on: false})).shown.autoPlay, false);
+  const fresh = await click({slot: 0, action: 'autoplay', on: true}); // Box closed: opened, then Start.
+  assert.equal(fresh.ok, true, fresh.error);
+  assert.equal((await click({slot: 0, action: 'autoplay', on: false})).shown.autoPlay, false);
+  await gameFrame.evaluate(() => { window.withOptions = false; });
 
   // Cooldown after a loss blocks Bet, and stop-loss blocks Bet + Auto Play ON while still allowing Cancel/Cash Out/Auto Play OFF.
   await post('/api/bet', {stake: 10, target: 2});

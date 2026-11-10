@@ -137,6 +137,14 @@ have nginx (or another web server) pass requests for that name to `http://127.0.
 HTTPS, with the `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` headers set and buffering off
 for `/events` and `/preview`. Requests for that name are refused until an account exists.
 
+**The game window, for admins.** On a server the game runs in a browser nobody sits in front of.
+With `MONITOR_GAME_WINDOW_PORT` set to the port of a noVNC viewer on the same machine (`setup.sh`
+does this), an admin sees **Open game window** above the live view: it opens the real game
+window in a new tab, to log in to the game or use it. It goes through the monitor, behind the
+same sign-in, and a view-only account is refused. Whoever can open it controls the browser that
+is logged in to the game, so give admin accounts only to people you would give the game account
+to. The monitor never stores the game password; let the browser in that window remember it.
+
 
 ## Running it on a server
 

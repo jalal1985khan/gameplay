@@ -5,6 +5,7 @@
 // a web server in front passes requests on under MONITOR_PUBLIC_HOST; that works only once
 // accounts exist (node users.js add ...), and everyone then has to sign in.
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const {spawn} = require('child_process');
@@ -41,6 +42,7 @@ function createMonitor({
   dataDir = path.join(__dirname, 'data'),
   profileDir = path.join(__dirname, 'browser-profile'),
   launch = null, // For tests: a function returning a Playwright browser context.
+  gameWindowPort = 0, // Where a noVNC viewer of the game window listens on this computer (0 = none).
   publicHost = '', // The name the monitor is shared under (e.g. monitor.example.com), behind a web server.
   staleMs = 180000, // Live, but the results list unread for this long: the game has stopped updating.
 } = {}) {
@@ -985,21 +987,29 @@ function createMonitor({
   const auth = createAuth(dataDir);
   publicHost = String(publicHost || '').trim().toLowerCase();
 
+  // Who is asking, by the name the monitor was reached under and the sign-in cookie.
+  function identify(req) {
+    const host = (req.headers.host || '').toLowerCase();
+    const shared = !!publicHost && host === publicHost;
+    const known = shared || /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+    const authOn = auth.enabled();
+    const token = (/(?:^|;\s*)monitor_sid=([a-f0-9]{64})/.exec(req.headers.cookie || '') || [])[1] || '';
+    const user = authOn ? auth.who(token) : {name: '', role: 'admin'};
+    const originOk = [`http://${host}`, ...(shared ? [`https://${host}`] : [])].includes(req.headers.origin);
+    return {host, shared, known, authOn, token, user, originOk};
+  }
+
   const server = http.createServer(async (req, res) => {
     // Reached as localhost by this computer's own browser, or under the shared name through the
     // web server in front. Other websites can't use it (checked by Host, and by Origin on every
     // action), and the shared name works only with accounts, never open.
-    const host = (req.headers.host || '').toLowerCase();
-    const shared = !!publicHost && host === publicHost;
-    if (!shared && !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) { res.writeHead(403).end('forbidden'); return; }
+    const {host, shared, known, authOn, token, user, originOk} = identify(req);
+    if (!known) { res.writeHead(403).end('forbidden'); return; }
     const {pathname, searchParams} = new URL(req.url, `http://${host}`);
     const json = (code, body, headers = {}) => res.writeHead(code, {'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers}).end(JSON.stringify(body));
-    const authOn = auth.enabled();
     if (shared && !authOn) { res.writeHead(403).end('Add an account first: node users.js add <name> admin'); return; }
-    const token = (/(?:^|;\s*)monitor_sid=([a-f0-9]{64})/.exec(req.headers.cookie || '') || [])[1] || '';
-    const user = authOn ? auth.who(token) : {name: '', role: 'admin'};
     const cookie = (value, maxAge) => `monitor_sid=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''}`;
-    if (req.method === 'POST' && req.headers.origin && ![`http://${host}`, ...(shared ? [`https://${host}`] : [])].includes(req.headers.origin)) { res.writeHead(403).end('forbidden'); return; }
+    if (req.method === 'POST' && req.headers.origin && !originOk) { res.writeHead(403).end('forbidden'); return; }
     if (req.method === 'GET' && pathname === '/login') {
       if (user) { res.writeHead(302, {Location: '/'}).end(); return; }
       res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'});
@@ -1020,11 +1030,22 @@ function createMonitor({
       return json(401, {ok: false, error: 'Sign in first.'});
     }
     if (req.method === 'POST' && pathname === '/api/logout') { auth.logout(token); return json(200, {ok: true}, {'Set-Cookie': cookie('', 0)}); }
-    if (req.method === 'GET' && pathname === '/api/me') return json(200, {ok: true, auth: authOn, name: user.name, role: user.role});
+    if (req.method === 'GET' && pathname === '/api/me') return json(200, {ok: true, auth: authOn, name: user.name, role: user.role, gameWindow: !!gameWindowPort && user.role === 'admin'});
     // A viewer can look at everything on the page and change nothing: not the capture, the
     // tracked bets, the settings, or anything in the game.
     const viewer = user.role !== 'admin';
-    if (viewer && (req.method === 'POST' || pathname === '/api/inspect' || pathname === '/api/diagnose')) return json(403, {ok: false, error: 'This account can only view.'});
+    if (viewer && (req.method === 'POST' || pathname === '/api/inspect' || pathname === '/api/diagnose' || pathname.startsWith('/vnc/'))) return json(403, {ok: false, error: 'This account can only view.'});
+    // The game window itself, for an admin: the noVNC viewer running on this computer, passed
+    // through the monitor so it sits behind the same sign-in. Whoever opens it controls the
+    // browser that is logged in to the game.
+    if (gameWindowPort && req.method === 'GET' && pathname.startsWith('/vnc/')) {
+      const up = http.request({host: '127.0.0.1', port: gameWindowPort, method: 'GET', path: req.url.slice(4), headers: {Host: `127.0.0.1:${gameWindowPort}`}}, r => {
+        res.writeHead(r.statusCode, {...r.headers, 'Cache-Control': 'no-store'});
+        r.pipe(res);
+      });
+      up.on('error', () => { if (!res.headersSent) res.writeHead(502, {'Content-Type': 'text/plain; charset=utf-8'}); res.end('The game window viewer is not running on the server.'); });
+      return up.end();
+    }
     if (req.method === 'POST') {
       const send = r => res.writeHead(r.ok ? 200 : 400, {'Content-Type': 'application/json'}).end(JSON.stringify(r));
       if (pathname === '/api/start') return send(await start((await readJson(req)).url));
@@ -1074,6 +1095,29 @@ function createMonitor({
     res.writeHead(404).end('not found');
   });
 
+  // The game window's live connection (a WebSocket to the noVNC viewer): admins only, and only
+  // from the monitor's own page.
+  const tunnels = new Set();
+  server.on('upgrade', (req, socket, head) => {
+    const {known, shared, authOn, user, originOk} = identify(req);
+    const pathname = String(req.url).split('?')[0];
+    if (!gameWindowPort || !known || (shared && !authOn) || !user || user.role !== 'admin' || !originOk || pathname !== '/vnc/websockify') {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    const up = net.connect(gameWindowPort, '127.0.0.1', () => {
+      // Only what the handshake needs is passed on; the sign-in cookie stays here.
+      const keep = Object.entries(req.headers).filter(([k]) => k === 'upgrade' || k === 'connection' || k.startsWith('sec-websocket-'));
+      up.write(`GET /websockify HTTP/1.1\r\nHost: 127.0.0.1:${gameWindowPort}\r\n${keep.map(([k, v]) => `${k}: ${v}\r\n`).join('')}\r\n`);
+      if (head && head.length) up.write(head);
+      socket.pipe(up).pipe(socket);
+    });
+    const end = () => { tunnels.delete(socket); socket.destroy(); up.destroy(); };
+    tunnels.add(socket);
+    socket.on('error', end); socket.on('close', end);
+    up.on('error', end); up.on('close', end);
+  });
+
   // Keep event streams open through idle proxies and sleeping laptops.
   const ping = setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 20000);
 
@@ -1088,6 +1132,7 @@ function createMonitor({
       for (const res of viewers) res.end();
       for (const res of clients) res.end();
       viewers.clear();
+      for (const s of tunnels) s.destroy();
       clients.clear();
       // An open monitor page keeps its connection alive; close it too, or quitting waits forever.
       const closed = new Promise(r => server.close(r));
@@ -1103,7 +1148,7 @@ module.exports = {createMonitor};
 
 if (require.main === module) {
   const port = Number(process.env.PORT) || 4321;
-  const monitor = createMonitor({port, headless: process.env.MONITOR_HEADLESS === '1', publicHost: process.env.MONITOR_PUBLIC_HOST || ''});
+  const monitor = createMonitor({port, headless: process.env.MONITOR_HEADLESS === '1', publicHost: process.env.MONITOR_PUBLIC_HOST || '', gameWindowPort: Number(process.env.MONITOR_GAME_WINDOW_PORT) || 0});
   monitor.listen().then(p => {
     const url = `http://localhost:${p}`;
     console.log(`Aviator Live Monitor is running at ${url}  (press Ctrl+C to quit)`);

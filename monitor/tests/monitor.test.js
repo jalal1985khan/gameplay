@@ -756,7 +756,7 @@ test('accounts: sign-in is required once an account exists, a viewer can look bu
   try {
     // No accounts: open to this computer as before, closed under the shared name.
     assert.equal((await call('/api/state')).status, 200);
-    assert.deepEqual((await call('/api/me')).data, {ok: true, auth: false, name: '', role: 'admin'});
+    assert.deepEqual((await call('/api/me')).data, {ok: true, auth: false, name: '', role: 'admin', gameWindow: false});
     assert.equal((await call('/api/state', {host: 'monitor.example.test'})).status, 403);
     assert.equal((await call('/api/state', {host: 'evil.example'})).status, 403);
 
@@ -788,7 +788,7 @@ test('accounts: sign-in is required once an account exists, a viewer can look bu
     assert.equal(inV.status, 200);
     assert.match(inV.headers['set-cookie'][0], /HttpOnly; SameSite=Lax; Max-Age=\d+; Secure/);
     const viewer = inV.headers['set-cookie'][0].split(';')[0];
-    assert.deepEqual((await call('/api/me', {cookie: viewer, ...shared})).data, {ok: true, auth: true, name: 'client', role: 'viewer'});
+    assert.deepEqual((await call('/api/me', {cookie: viewer, ...shared})).data, {ok: true, auth: true, name: 'client', role: 'viewer', gameWindow: false});
     assert.equal((await call('/api/state', {cookie: viewer, ...shared})).status, 200);
     assert.equal((await call('/api/analysis', {cookie: viewer, ...shared})).status, 200);
     assert.equal((await call('/', {cookie: viewer, ...shared})).status, 200);
@@ -819,4 +819,60 @@ test('accounts: sign-in is required once an account exists, a viewer can look bu
     assert.equal((await call('/api/login', {method: 'POST', body: {name: 'boss', password: 'long-enough-1'}, ...from})).status, 429);
     assert.equal((await call('/api/login', {method: 'POST', body: {name: 'boss', password: 'long-enough-1'}})).status, 200);
   } finally { await m.close(); }
+});
+
+test('the game window is passed through to an admin only, page and live connection', async () => {
+  const net = require('node:net');
+  const {createAuth} = require('../lib/auth.js');
+  // Stands in for the noVNC viewer: a page, and a WebSocket handshake that answers.
+  const seen = [];
+  const viewer = http.createServer((req, res) => { seen.push(req.url); res.writeHead(200, {'Content-Type': 'text/html'}).end('<title>noVNC</title>'); });
+  viewer.on('upgrade', (req, socket) => { seen.push({url: req.url, cookie: req.headers.cookie || null, key: req.headers['sec-websocket-key']}); socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nhello'); });
+  const viewerPort = await listen(viewer);
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'monitor-window-'));
+  const dataDir = path.join(dir2, 'data');
+  const m = createMonitor({port: 0, headless: true, dataDir, profileDir: path.join(dir2, 'profile'), gameWindowPort: viewerPort});
+  const p = await m.listen();
+  const get = (pathname, cookie) => fetch(`http://127.0.0.1:${p}${pathname}`, {headers: cookie ? {Cookie: cookie} : {}, redirect: 'manual'});
+  const signIn = async (name, password) => (await fetch(`http://127.0.0.1:${p}/api/login`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, password})})).headers.get('set-cookie').split(';')[0];
+  const upgrade = ({cookie, origin = `http://127.0.0.1:${p}`, url = '/vnc/websockify'} = {}) => new Promise(resolve => {
+    const s = net.connect(p, '127.0.0.1', () => s.write(`GET ${url} HTTP/1.1\r\nHost: 127.0.0.1:${p}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n${origin ? `Origin: ${origin}\r\n` : ''}${cookie ? `Cookie: ${cookie}\r\n` : ''}\r\n`));
+    let text = '';
+    s.on('data', c => { text += c; });
+    s.on('close', () => resolve(text));
+    s.on('error', () => resolve(text));
+  });
+  try {
+    const auth = createAuth(dataDir);
+    auth.addUser('boss', 'admin', 'long-enough-1');
+    auth.addUser('client', 'viewer', 'long-enough-2');
+    const admin = await signIn('boss', 'long-enough-1'), client = await signIn('client', 'long-enough-2');
+
+    assert.equal((await (await get('/api/me', admin)).json()).gameWindow, true);
+    assert.equal((await (await get('/api/me', client)).json()).gameWindow, false);
+
+    // The viewer page.
+    assert.equal((await get('/vnc/vnc.html?autoconnect=1')).status, 401);
+    assert.equal((await get('/vnc/vnc.html', client)).status, 403);
+    const page = await get('/vnc/vnc.html?autoconnect=1', admin);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /noVNC/);
+    assert.deepEqual(seen, ['/vnc.html?autoconnect=1']);
+
+    // The live connection.
+    assert.match(await upgrade(), /^HTTP\/1\.1 403/);
+    assert.match(await upgrade({cookie: client}), /^HTTP\/1\.1 403/);
+    assert.match(await upgrade({cookie: admin, origin: 'https://evil.example'}), /^HTTP\/1\.1 403/);
+    assert.match(await upgrade({cookie: admin, origin: ''}), /^HTTP\/1\.1 403/);
+    assert.match(await upgrade({cookie: admin, url: '/vnc/other'}), /^HTTP\/1\.1 403/);
+    assert.equal(seen.length, 1, 'nothing refused reached the viewer');
+    const live = await upgrade({cookie: admin});
+    assert.match(live, /^HTTP\/1\.1 101/);
+    assert.match(live, /hello$/);
+    assert.deepEqual(seen[1], {url: '/websockify', cookie: null, key: 'dGhlIHNhbXBsZSBub25jZQ=='});
+  } finally { await m.close(); viewer.closeAllConnections(); viewer.close(); }
+
+  // Without a viewer configured there is no game window at all.
+  assert.equal((await fetch(`${base}/vnc/vnc.html`)).status, 404);
+  assert.equal((await (await fetch(`${base}/api/me`)).json()).gameWindow, false);
 });

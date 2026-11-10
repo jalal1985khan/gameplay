@@ -13,6 +13,7 @@
 #   4. Creates and starts four services, so everything comes back after a reboot.
 #   5. Asks for the sign-in accounts (an admin, and optionally a view-only one).
 #   6. With --domain: publishes the monitor at https://<domain> through nginx with a certificate.
+#      An admin who signs in there can also open the game window; a viewer cannot.
 #
 # Nothing is opened to the internet unless --domain is given: the monitor, VNC and noVNC all
 # listen on the server itself only, and are reached through an SSH tunnel.
@@ -61,7 +62,7 @@ case "$APP_DIR" in
 esac
 if [ -n "$DOMAIN" ]; then
   [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || die "'$DOMAIN' does not look like a domain name."
-  [ -n "$EMAIL" ] || die "Add --email you@example.com (the certificate authority sends expiry notices there)."
+  [ -n "$EMAIL" ] || [ -d "/etc/letsencrypt/live/$DOMAIN" ] || die "Add --email you@example.com (the certificate authority sends expiry notices there)."
   DOMAIN="$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
 fi
 
@@ -191,6 +192,7 @@ Environment=DISPLAY=$DISPLAY_NO
 Environment=MONITOR_NO_OPEN=1
 Environment=PORT=$PORT
 Environment=MONITOR_PUBLIC_HOST=$DOMAIN
+Environment=MONITOR_GAME_WINDOW_PORT=$NOVNC_PORT
 ExecStart=$NODE_BIN server.js
 Restart=always
 RestartSec=3
@@ -252,15 +254,13 @@ if [ "$(accounts)" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------- 6. domain (optional)
-if [ -n "$DOMAIN" ] && [ "$DOMAIN" = "${KEPT_DOMAIN:-}" ]; then
-  ok "Still shared at https://$DOMAIN (nginx and the certificate were left as they are)"
-elif [ -n "$DOMAIN" ]; then
+if [ -n "$DOMAIN" ]; then
   step "Publishing at https://$DOMAIN"
   apt-get install -y -qq nginx certbot python3-certbot-nginx >/dev/null
   site="/etc/nginx/sites-available/aviator-monitor"
   cat > "$site" <<NGINX
-# Aviator Live Monitor (written by setup.sh). Only the monitor page is published; the VNC view
-# of the game window is never served here.
+# Aviator Live Monitor (written by setup.sh). Everything goes through the monitor, which asks
+# for a sign-in; the game window is passed on by the monitor to admins only.
 server {
   listen 80;
   listen [::]:80;
@@ -276,13 +276,25 @@ server {
     proxy_buffering off;          # Live rounds and the game picture are streams.
     proxy_read_timeout 1h;
   }
+  # The game window's live connection (a WebSocket), for a signed-in admin.
+  location = /vnc/websockify {
+    proxy_pass http://127.0.0.1:$PORT;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Forwarded-For \$remote_addr;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+  }
 }
 NGINX
   ln -sf "$site" /etc/nginx/sites-enabled/aviator-monitor
   nginx -t 2>/dev/null || { nginx -t || true; rm -f /etc/nginx/sites-enabled/aviator-monitor; die "nginx rejected the new site, so it was switched off again. Your other sites were not changed."; }
   systemctl reload nginx
   ok "nginx passes $DOMAIN to the monitor"
-  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect >/dev/null 2>&1; then
+  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos ${EMAIL:+-m "$EMAIL"} --redirect --keep-until-expiring >/dev/null 2>&1; then
     ok "HTTPS certificate installed (renews by itself)"
   else
     warn "The certificate could not be issued. Check that $DOMAIN points to this server's address and that ports 80 and 443 are open, then run:  sudo certbot --nginx -d $DOMAIN -m $EMAIL --agree-tos --redirect"
@@ -301,8 +313,8 @@ cat <<DONE
 
     Then in your browser:
       Monitor page        http://localhost:$PORT
-      Game window (log in to the game here)
-                          http://localhost:$NOVNC_PORT/vnc.html   -> Connect
+      Game window         the "Open game window" link on the monitor page (admins only);
+                          log in to the game there
 DONE
 [ -z "$DOMAIN" ] || echo "      Shared address      https://$DOMAIN   (sign-in required)"
 cat <<DONE

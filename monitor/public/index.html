@@ -301,7 +301,7 @@
   <div class="note"><strong>This shows what happened, not what happens next.</strong> Every round is random and independent, so no pattern here predicts the next one. Over time the game keeps about 3% of every bet. The monitor only reads the results list; it never sees your password and never places bets.</div>
   </div>
   <aside class="preview">
-    <h2><span>Game window <small class="empty">live view</small></span></h2>
+    <h2><span>Game window <small class="empty">live view</small></span><a id="openGame" href="/vnc/vnc.html?autoconnect=1&amp;resize=scale&amp;path=vnc/websockify" target="_blank" rel="noopener" hidden>Open game window</a></h2>
     <div class="screen"><img id="screen" alt="Live view of the game window" hidden><div class="blank" id="screenBlank">The game window appears here once capture starts.</div></div>
     <p>A picture of what the game window shows right now. Log in and play in that window itself; this view is for watching only.</p>
 
@@ -922,6 +922,8 @@
   setInterval(render, 5000); // Keeps "last new round … ago" current.
   // With accounts on: who is signed in, and a view-only page for a viewer.
   fetch('/api/me').then(r => r.json()).then(me => {
+    // On a server, an admin can open the real game window (to log in to the game) from here.
+    if (me.ok && me.gameWindow) $('openGame').hidden = false;
     if (!me.ok || !me.auth) return;
     document.body.classList.toggle('viewer', me.role !== 'admin');
     $('whoName').textContent = me.role === 'admin' ? me.name : `${me.name} · view only`;

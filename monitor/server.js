@@ -7,12 +7,19 @@ const fs = require('fs');
 const path = require('path');
 const {spawn} = require('child_process');
 const AviatorMatch = require('./lib/match.js');
+const Analysis = require('./lib/analysis.js');
+const {createStore, atomicWrite} = require('./lib/store.js');
 
-const MAX_ROUNDS = 5000;
+// Rounds kept in memory for the page and the analysis; the log on disk keeps every round.
+const MAX_ROUNDS = 50000;
 // Defaults for the settings popup. pauseRounds: after a loss the bet button hides for this many
 // rounds. stopLossShare: the day ends once this share of the budget is lost.
-const DEFAULT_SETTINGS = {pauseRounds: 3, stopLossShare: 0.25, alarmSound: true};
+// remindMinutes: a reminder once capture has been running this long (0 = off).
+const DEFAULT_SETTINGS = {pauseRounds: 3, stopLossShare: 0.25, alarmSound: true, remindMinutes: 60};
 const STOP_LOSS_CHOICES = [0.1, 0.25, 0.5, 1];
+const REMIND_CHOICES = [0, 30, 60, 120];
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const STATIC = {'/analysis.js': 'text/javascript; charset=utf-8'};
 const CAPTURE_SCRIPT = path.join(__dirname, 'lib', 'capture.js');
 const STAY_VISIBLE_SCRIPT = path.join(__dirname, 'lib', 'stay-visible.js');
 // Chrome slows or freezes pages in hidden tabs and covered windows; the game must keep running.
@@ -30,11 +37,12 @@ function createMonitor({
   dataDir = path.join(__dirname, 'data'),
   profileDir = path.join(__dirname, 'browser-profile'),
   launch = null, // For tests: a function returning a Playwright browser context.
+  staleMs = 180000, // Live, but the results list unread for this long: the game has stopped updating.
 } = {}) {
-  const historyFile = path.join(dataDir, 'history.json');
+  const store = createStore(dataDir, MAX_ROUNDS);
   // Captured rounds, oldest first; gaps are indexes where rounds were missed before that round.
-  let history = {origin: null, values: [], times: [], gaps: []};
-  try { history = {...history, ...JSON.parse(fs.readFileSync(historyFile, 'utf8'))}; } catch {}
+  // Each game site has its own log; the site captured last is shown when the monitor starts.
+  let history = store.load(store.lastOrigin());
   // Bets the person tracks (placed by them in the game window, never by the monitor).
   // `seen` counts every round captured since the monitor started this history, so a bet is
   // matched to the round that finishes after it was added, even when old rounds are trimmed.
@@ -51,8 +59,10 @@ function createMonitor({
     if (input.stopLossShare !== undefined && !STOP_LOSS_CHOICES.includes(share)) return {ok: false, error: 'Pick one of the stop-loss options.'};
     if (input.pauseRounds !== undefined) settings.pauseRounds = pause;
     if (input.stopLossShare !== undefined) settings.stopLossShare = share;
+    if (input.remindMinutes !== undefined && !REMIND_CHOICES.includes(Number(input.remindMinutes))) return {ok: false, error: 'Pick one of the reminder options.'};
     if (input.alarmSound !== undefined) settings.alarmSound = input.alarmSound === true;
-    try { fs.mkdirSync(dataDir, {recursive: true}); fs.writeFileSync(settingsFile, JSON.stringify(settings)); } catch {}
+    if (input.remindMinutes !== undefined) settings.remindMinutes = Number(input.remindMinutes);
+    try { atomicWrite(settingsFile, JSON.stringify(settings)); } catch {}
     broadcast();
     return {ok: true};
   }
@@ -68,7 +78,7 @@ function createMonitor({
     }
   } catch {}
   const saveSession = () => {
-    try { fs.mkdirSync(dataDir, {recursive: true}); fs.writeFileSync(sessionFile, JSON.stringify({...session, seen})); } catch {}
+    try { atomicWrite(sessionFile, JSON.stringify({...session, seen})); } catch {}
   };
 
   function sessionState() {
@@ -100,7 +110,11 @@ function createMonitor({
       if (!slots.some(x => x.autoPlay) && slots.some(x => x.autoPlay === false)) warnings.push('Auto Play looks OFF in the game, so it may not be betting every round.');
     }
     if (balance !== null && balance > 0 && autoBet && balance < autoBet.stake) warnings.push(`Your game balance (₹${balance}) is less than the bet, so the game cannot place it.`);
+    const stats = Analysis.sessionStats(session.bets);
+    if (stats.chaseRun >= 2) warnings.push('You raised your bet after each of your last losses. That is chasing losses: go back to your planned bet, or stop for today.');
+    else if (stats.chases >= 3) warnings.push(`You have raised your bet right after a loss ${stats.chases} times today.`);
     return {
+      stats,
       budget: session.budget, stopLoss, net, left: session.budget + net, startedAt: session.startedAt,
       balance, balanceStart, realNet, realStopped, warnings,
       game: panel ? {slots, gameAutoPlay, at: panel.at} : null,
@@ -194,11 +208,24 @@ function createMonitor({
   function resetSession(budget) {
     budget = Math.round(Number(budget));
     if (!(budget > 0)) return {ok: false, error: 'Enter the money you are ready to lose today.'};
+    archiveDay();
     session = newSession(budget);
     session.balanceStart = panel ? panel.balance : null;
     saveSession();
     broadcast();
     return {ok: true};
+  }
+
+  // The day that is ending goes to the "Past days" list, when any bet in it was decided.
+  function archiveDay() {
+    const st = sessionState();
+    if (!st.bets) return;
+    store.addDay({
+      startedAt: session.startedAt, endedAt: Date.now(), site: history.origin, budget: st.budget, stopLoss: st.stopLoss,
+      bets: st.bets, wins: st.wins, losses: st.losses, wagered: st.wagered, net: Math.round(st.net * 100) / 100, realNet: st.realNet,
+      practice: session.bets.filter(b => b.practice).length, stopped: st.stopped,
+      maxDrawdown: st.stats.maxDrawdown, longestLosses: st.stats.longestLosses,
+    });
   }
 
   // New rounds arrived (oldest first). gap: rounds were missed before them.
@@ -294,24 +321,30 @@ function createMonitor({
     });
   }
 
-  let saveTimer = 0;
-  const save = () => {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try { fs.mkdirSync(dataDir, {recursive: true}); fs.writeFileSync(historyFile, JSON.stringify(history)); } catch {}
-    }, 300);
-  };
+  // Totals over all rounds, worked out again only when the rounds change.
+  let summaryOf = null, summary = null;
+  function totals() {
+    if (summaryOf === history.values) return summary;
+    const {values, times} = history, n = values.length;
+    const sorted = [...values].sort((a, b) => a - b), m = Math.floor(n / 2);
+    summaryOf = values;
+    return summary = {
+      median: n ? (n % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2) : null,
+      over2: n ? values.filter(v => v >= 2).length / n : null,
+      pace: Analysis.pace(times),
+    };
+  }
+  const isStale = () => capture.status === 'live' && Date.now() - capture.lastSnapshotAt > staleMs;
 
   function state() {
     const {values, times, gaps} = history, n = values.length;
-    const sorted = [...values].sort((a, b) => a - b), m = Math.floor(n / 2);
     const start = Math.max(0, n - 200);
     return {
-      capture,
+      capture: {...capture, stale: isStale()},
+      site: history.origin,
       count: n,
       latest: n ? values[n - 1] : null,
-      median: n ? (n % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2) : null,
-      over2: n ? values.filter(v => v >= 2).length / n : null,
+      ...totals(),
       breaks: gaps.length,
       // Newest 200 rounds, newest first, with a flag where rounds were missed before them.
       recent: values.slice(start).map((v, i) => ({v, at: times[start + i], gap: gaps.includes(start + i)})).reverse(),
@@ -324,6 +357,12 @@ function createMonitor({
     for (const res of clients) res.write(data);
   }
   const setCapture = patch => { capture = {...capture, ...patch}; broadcast(); };
+  // Tell the page when a live capture goes quiet (game frozen, logged out, connection lost).
+  let wasStale = false;
+  const staleTimer = setInterval(() => {
+    const stale = isStale();
+    if (stale !== wasStale) { wasStale = stale; broadcast(); }
+  }, Math.min(5000, Math.max(250, staleMs / 4)));
 
   function onPanel(p) {
     if (!p || typeof p !== 'object' || !['waiting', 'live'].includes(capture.status)) return;
@@ -363,9 +402,9 @@ function createMonitor({
       settleBets(fresh, gap);
       const next = AviatorMatch.append(history.values, history.gaps, fresh, gap, MAX_ROUNDS);
       const times = [...history.times, ...fresh.map(() => now)].slice(-next.captured.length);
+      store.append(history.origin, fresh, now, gap && history.values.length > 0);
       history = {...history, values: next.captured, times, gaps: next.gaps};
       patch.lastRoundAt = now;
-      save();
     }
     setCapture(patch);
   }
@@ -388,8 +427,16 @@ function createMonitor({
     try { url = new URL(String(rawUrl || '').trim()); } catch {}
     if (!url || !['http:', 'https:'].includes(url.protocol)) return {ok: false, error: 'Enter the full game address, starting with https://'};
     if (context) await stop('');
-    // A different game site starts a fresh history; the same site continues it.
-    if (history.origin !== url.origin) { history = {origin: url.origin, values: [], times: [], gaps: []}; save(); }
+    // Each game site has its own history: a different site shows its own rounds, and the
+    // other site's rounds stay saved for the next time it is opened.
+    if (history.origin !== url.origin) {
+      history = store.load(url.origin);
+      // Bets waiting on the other site's rounds can't be matched here.
+      for (const b of session.bets) if (b.result === 'pending') b.result = 'unknown';
+      session.autoBet = null;
+      saveSession();
+    }
+    store.setOrigin(url.origin);
     setCapture({status: 'starting', note: 'Opening the game window…', url: url.href, startedAt: Date.now(), lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false});
     try {
       context = await openBrowser();
@@ -482,10 +529,20 @@ function createMonitor({
   }
 
   function clear() {
+    store.clear(history.origin);
     history = {origin: history.origin, values: [], times: [], gaps: []};
-    save();
     broadcast();
     return {ok: true};
+  }
+
+  // Analysis of the captured rounds for the page: ?target=2&size=1000&stake=10 (size 0 = all).
+  function analysis(q) {
+    const num = (name, fallback, ok) => { const v = Number(q.get(name)); return q.get(name) !== null && ok(v) ? v : fallback; };
+    const target = Math.round(num('target', 2, v => v > 1 && v <= 1000) * 100) / 100;
+    const size = num('size', 0, v => Number.isInteger(v) && v >= 0);
+    const stake = num('stake', 10, v => v > 0 && v <= 1e9);
+    const stopLoss = num('stopLoss', 0, v => v >= 0 && v <= 1e12);
+    return {ok: true, site: history.origin, total: history.values.length, ...Analysis.analyse(history, {target, size, stake, stopLoss})};
   }
 
   function csv() {
@@ -505,7 +562,7 @@ function createMonitor({
     // windows or read rounds through it (checked by Host, and by Origin on every action).
     const host = req.headers.host || '';
     if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) { res.writeHead(403).end('forbidden'); return; }
-    const {pathname} = new URL(req.url, `http://${host}`);
+    const {pathname, searchParams} = new URL(req.url, `http://${host}`);
     if (req.method === 'POST') {
       if (req.headers.origin && req.headers.origin !== `http://${host}`) { res.writeHead(403).end('forbidden'); return; }
       const send = r => res.writeHead(r.ok ? 200 : 400, {'Content-Type': 'application/json'}).end(JSON.stringify(r));
@@ -523,6 +580,12 @@ function createMonitor({
         res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'});
         return fs.createReadStream(PAGE).pipe(res);
       }
+      if (STATIC[pathname]) {
+        res.writeHead(200, {'Content-Type': STATIC[pathname], 'Cache-Control': 'no-store'});
+        return fs.createReadStream(path.join(PUBLIC_DIR, pathname)).pipe(res);
+      }
+      if (pathname === '/api/analysis') return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify(analysis(searchParams)));
+      if (pathname === '/api/days') return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify({ok: true, days: store.days()}));
       if (pathname === '/preview') {
         res.writeHead(200, {'Content-Type': 'multipart/x-mixed-replace; boundary=frame', 'Cache-Control': 'no-store', Connection: 'keep-alive'});
         viewers.add(res);
@@ -555,11 +618,17 @@ function createMonitor({
     close: async () => {
       clearInterval(ping);
       clearInterval(grabTimer);
-      for (const res of viewers) res.end();
-      clearTimeout(saveTimer);
-      for (const res of clients) res.end();
+      clearInterval(staleTimer);
+      // Close the game window first (it sends a last update), then the open pages.
       await stop('');
-      await new Promise(r => server.close(r));
+      for (const res of viewers) res.end();
+      for (const res of clients) res.end();
+      viewers.clear();
+      clients.clear();
+      // An open monitor page keeps its connection alive; close it too, or quitting waits forever.
+      const closed = new Promise(r => server.close(r));
+      if (server.closeAllConnections) server.closeAllConnections();
+      await closed;
     },
     state, start, stop,
     _context: () => context, // For tests.
@@ -582,7 +651,15 @@ if (require.main === module) {
     console.error(e.code === 'EADDRINUSE' ? `Port ${port} is busy. Is the monitor already running? Open http://localhost:${port}` : e);
     process.exit(1);
   });
-  const quit = () => monitor.close().finally(() => process.exit(0));
+  // Ctrl+C quits. If closing the game window hangs, a second Ctrl+C (or 5 seconds) forces it.
+  let quitting = false;
+  const quit = () => {
+    if (quitting) process.exit(0);
+    quitting = true;
+    console.log('Closing… (press Ctrl+C again to force)');
+    setTimeout(() => process.exit(0), 5000).unref();
+    monitor.close().finally(() => process.exit(0));
+  };
   process.on('SIGINT', quit);
   process.on('SIGTERM', quit);
 }

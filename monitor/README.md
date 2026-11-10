@@ -17,7 +17,7 @@ npm start        # opens http://localhost:4321
 1. Paste your game's address (for example `https://your-site.example/aviator`) and click **Start live capture**.
 2. A separate Chrome window opens on that address. Log in there as usual and open the Aviator game.
 3. Finished rounds appear on the monitor page as they happen: count, latest, median, share that reached 2×, and the newest 200 rounds.
-4. **Stop capture** closes the game window. Rounds are kept (and saved in `data/`) until you click **Clear** or start on a different site. **Download CSV** exports them.
+4. **Stop capture** closes the game window. Rounds are kept (and saved in `data/`) until you click **Clear**. **Download CSV** exports them.
 
 The right side of the monitor shows a live view of the game window, so you can watch the game there.
 The game keeps running when you switch tabs or put other windows on top of it (the game page is
@@ -59,6 +59,28 @@ places bets itself.
 **My results** (right side, under the live view): today's bets, wins, losses, net result, win
 rate, how much of the stop-loss is used, and a row per bet (time, bet, exit, where the plane
 went, result). **Download** saves them as a CSV.
+
+**Analysis of your captured rounds** (bottom of the page; choose the last 200, 1,000, 5,000 or all rounds):
+- the latest 60 rounds as a chart, against your cash-out target;
+- where rounds ended, next to the share the game's odds give (0.97 ÷ target);
+- a table per cash-out target: how many rounds reached it, the likely range, and whether that matches the game's odds;
+- ten checks for patterns (streaks, a high round after a high round, "after 3 low rounds", …), each
+  judged against chance. A difference usually means missed rounds, and never predicts the next round;
+- your bet and target replayed on exactly these rounds: result, biggest drop, most losses in a row.
+
+The risk numbers in the bet helper are exact calculations, not simulated sessions.
+
+**Past days.** Starting a new day stores the finished day (bets, win rate, total bet, biggest drop, net).
+My results also charts today's running result and warns when you raise your bet after losses.
+
+**If the game goes quiet.** When a live capture gets no update for 3 minutes (game frozen, logged
+out, connection lost) the status turns yellow and says so. **Why no rounds?** shows what the
+monitor finds in each frame of the game window. A break reminder (Settings: off, 30 min, 1 h, 2 h)
+appears once the game has been open that long.
+
+**Where rounds are kept.** Every round is added to `data/rounds/<site>.ndjson` the moment it is
+captured (one line per round, never trimmed). Each game site has its own file, so switching sites
+does not erase anything. The page works with the newest 50,000 rounds.
 
 The game window uses its own browser profile (`browser-profile/`), so you stay logged in next time.
 If the game window is closed, click Start live capture again.

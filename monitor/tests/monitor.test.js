@@ -221,7 +221,8 @@ test('tracks bets: win, loss, cooldown after a loss, stop-loss, new day', async 
 test('settings change the pause after a loss and the stop-loss, straight away', async () => {
   const set = body => post('/api/settings', body).then(r => r.json());
   let s = await state();
-  assert.deepEqual(s.settings, {pauseRounds: 3, stopLossShare: 0.25, alarmSound: true});
+  assert.deepEqual(s.settings, {pauseRounds: 3, stopLossShare: 0.25, alarmSound: true, remindMinutes: 60});
+  assert.match((await set({remindMinutes: 45})).error, /reminder/);
   assert.equal(s.session.cooldownLeft, 3); // From the manual loss in the previous test.
   assert.deepEqual(await set({pauseRounds: 1}), {ok: true});
   s = await state();
@@ -236,7 +237,7 @@ test('settings change the pause after a loss and the stop-loss, straight away', 
   assert.match((await set({pauseRounds: 1.5})).error, /0 to 10/);
   assert.match((await set({stopLossShare: 0.3})).error, /stop-loss/);
   // Saved for next time.
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'data', 'settings.json'), 'utf8')), {pauseRounds: 0, stopLossShare: 0.5, alarmSound: true});
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'data', 'settings.json'), 'utf8')), {pauseRounds: 0, stopLossShare: 0.5, alarmSound: true, remindMinutes: 60});
   await set({pauseRounds: 3, stopLossShare: 0.25});
 });
 
@@ -326,9 +327,71 @@ test('stop closes the game window; history is kept and saved', async () => {
   assert.equal(s.capture.status, 'stopped');
   assert.equal(s.count, 28);
   assert.equal(s.session.canBet, false, 'no bets while not capturing');
-  await wait(500);
-  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'data', 'history.json'), 'utf8'));
-  assert.equal(saved.values.length, 28);
+  // Every round is already in the site's log: one line each, written as it was captured.
+  const log = fs.readFileSync(path.join(dir, 'data', 'rounds', `localhost_${gamePort}.ndjson`), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.equal(log.length, 28);
+  assert.deepEqual(log.slice(0, 3).map(r => r.v), [1.2, 3.45, 1]);
+});
+
+test('analysis of the captured rounds: odds table, bands, checks and a replayed bet', async () => {
+  const a = await (await fetch(base + '/api/analysis?target=2&stake=10&size=11')).json();
+  const values = (await state()).recent.slice(0, 11).map(r => r.v).reverse();
+  assert.equal(a.ok, true);
+  assert.equal(a.rounds, 11);
+  assert.equal(a.total, 28);
+  const hits = values.filter(v => v >= 2).length;
+  assert.equal(a.base.hits, hits);
+  assert.equal(a.ladder.find(r => r.target === 2).hits, hits);
+  assert.equal(a.distribution.bands.reduce((n, b) => n + b.count, 0), 11);
+  assert.ok(Math.abs(a.distribution.bands.reduce((n, b) => n + b.expected, 0) - 1) < 1e-9, "the game's odds add up to 100%");
+  assert.equal(a.checks.odds.verdict, 'too-few', '11 rounds are not enough to judge');
+  // The same ₹10 bet at 2× on each of those rounds, worked out by hand.
+  assert.equal(a.backtest.bets, 11);
+  assert.equal(a.backtest.net, hits * 10 - (11 - hits) * 10);
+  assert.equal(a.backtest.expectedNet, -3.3);
+  assert.equal(a.backtest.points.at(-1).net, a.backtest.net);
+  // Bad input falls back to safe values instead of failing.
+  const b = await (await fetch(base + '/api/analysis?target=abc&size=-4&stake=0')).json();
+  assert.deepEqual([b.target, b.size, b.backtest.stake, b.rounds], [2, 0, 10, 28]);
+  // The page and its chart script are served.
+  assert.match(await (await fetch(base + '/analysis.js')).text(), /AnalysisUI/);
+});
+
+test('finished days are kept; each game site keeps its own rounds', async () => {
+  const days = (await (await fetch(base + '/api/days')).json()).days;
+  assert.ok(days.length >= 2, 'the days ended by "new day" in earlier tests');
+  const day = days.find(d => d.bets > 0 && d.losses > 0);
+  assert.ok(day && day.wagered > 0 && day.maxDrawdown > 0 && day.longestLosses >= 1, JSON.stringify(days));
+  assert.equal(day.site, `http://localhost:${gamePort}`);
+  // Another site starts empty, and coming back shows the first site's rounds again.
+  await post('/api/start', {url: `http://127.0.0.1:${gamePort}/game`});
+  const other = await until(state, s => s.count >= 11);
+  assert.equal(other.site, `http://127.0.0.1:${gamePort}`);
+  assert.equal(other.count, 11);
+  await post('/api/stop');
+  await post('/api/start', {url: `http://localhost:${gamePort}/`});
+  const back = await state();
+  assert.ok(back.count >= 28, 'the first site still has its rounds');
+  assert.equal(back.site, `http://localhost:${gamePort}`);
+  await post('/api/stop');
+});
+
+test('a monitor started again reads its rounds back from the log; a live game that goes quiet is flagged', async () => {
+  const again = createMonitor({port: 0, headless: true, dataDir: path.join(dir, 'data'), profileDir: path.join(dir, 'profile2'), staleMs: 1500});
+  const url = `http://localhost:${await again.listen()}`;
+  try {
+    const get = () => fetch(url + '/api/state').then(r => r.json());
+    const s = await get();
+    assert.equal(s.count, (await state()).count);
+    assert.ok(s.count >= 28);
+    assert.equal(s.site, `http://localhost:${gamePort}`);
+    // The fake game stops adding rounds after five: soon nothing changes on its page.
+    await fetch(url + '/api/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url: `http://localhost:${gamePort}/`})});
+    const live = await until(get, x => x.capture.status === 'live' && x.capture.stale === false);
+    assert.equal(live.capture.stale, false);
+    const quiet = await until(get, x => x.capture.stale === true);
+    assert.equal(quiet.capture.stale, true);
+  } finally { await again.close(); }
 });
 
 test('clear empties the history', async () => {

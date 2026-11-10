@@ -136,6 +136,53 @@
   .rtable td{padding:7px 8px;border-top:1px solid var(--border)}
   .rtable td:last-child,.rtable th:last-child{text-align:right}
   .rtable .tag{font-size:11px;color:var(--muted)}
+  /* Charts. Marks carry the series colours; all text stays in text colours. */
+  .viz{--s1:#3987e5;--s2:#d95926;--grid:#2b3344}
+  .viz svg{display:block;width:100%;height:auto}
+  .viz .s1{fill:var(--s1)}.viz .s2{fill:var(--s2)}
+  .viz .grid{stroke:var(--grid);stroke-width:1}
+  .viz .zero{stroke:#55607a;stroke-width:1}
+  .viz .ref{stroke:var(--text);stroke-width:1;opacity:.7}
+  .viz .mark{stroke:var(--text);stroke-width:2;stroke-linecap:round}
+  .viz .tick{fill:var(--muted);font-size:11px}
+  .viz .end{fill:var(--text);font-size:12px;font-weight:600}
+  .viz .line{fill:none;stroke:var(--s1);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  .viz .area{fill:var(--s1);opacity:.1}
+  .viz .dot{fill:var(--s1);stroke:var(--panel);stroke-width:2}
+  .viz .cross{stroke:var(--muted);stroke-width:1}
+  .viz .hit{fill:transparent}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted);margin-bottom:8px}
+  .legend .k{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+  .legend .k.s1{background:#3987e5}.legend .k.s2{background:#d95926}
+  .legend .k.mark,.legend .k.line{height:2px;width:14px;background:var(--text);vertical-align:3px;border-radius:1px}
+  .viz-tip{position:fixed;z-index:50;pointer-events:none;background:#0b0e15;border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.45;color:var(--muted);max-width:260px}
+  .viz-tip b{color:var(--text);font-size:13px}
+  .analysis{margin-top:34px}
+  .analysis > h2{font-size:17px}
+  .agrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+  .agrid .panel h3{margin:0 0 10px;font-size:14px}
+  .agrid .wide{grid-column:1/-1}
+  .atiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+  .atiles .tile small{display:block;color:var(--muted);font-size:12px;margin-top:4px}
+  .sizes{display:inline-flex;gap:4px}
+  .sizes button{padding:5px 10px;font-size:12px;font-weight:600;background:#252c3b;color:var(--text);border:1px solid var(--border);border-radius:8px;text-decoration:none}
+  .sizes button.on{background:var(--accent);color:#171126;border-color:var(--accent)}
+  .checks{display:grid;gap:8px;font-size:14px}
+  .checks > div{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--border);padding-bottom:8px}
+  .checks b{font-weight:600}
+  .checks small{display:block;color:var(--muted);font-size:12px}
+  .vb{flex:none;font-size:12px;padding:3px 8px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+  .vb.ok::before{content:"✓ "}.vb.warn::before{content:"! "}.vb.bad::before{content:"✕ "}
+  .vb.ok{color:var(--ok)}.vb.warn{color:var(--warn)}.vb.bad{color:var(--low)}.vb.muted{color:var(--muted)}
+  .rtable tr.sel td{background:#222a3b;font-weight:600}
+  .table-scroll{overflow:auto}
+  .remind{margin:0 0 16px;padding:12px 14px;border-radius:10px;background:#302819;border:1px solid #59472a;color:#f6e6c4;font-size:14px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+  .remind button,.status button{padding:7px 12px;font-size:13px;background:#252c3b;color:var(--text);border:1px solid var(--border)}
+  .status{flex-wrap:wrap}
+  .status .grow{flex:1 1 240px}
+  .stale .dot{background:var(--warn)}
+  #diagBox{white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,monospace;color:var(--muted);max-height:50vh;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px}
+  @media (max-width:1000px){.agrid{grid-template-columns:1fr}.atiles{grid-template-columns:repeat(2,1fr)}}
   @media (max-width:1000px){.layout{grid-template-columns:1fr}.preview{position:static;order:-1;max-height:none}}
   @media (max-width:560px){.tiles{grid-template-columns:repeat(2,1fr)}.answer{grid-template-columns:1fr}.helper-in{grid-template-columns:1fr}.bar button{flex:1}}
 </style>
@@ -168,6 +215,9 @@
       <p class="fine">Once you are down this much, the bet button hides for the rest of the day.</p>
       <label class="check"><input type="checkbox" id="setSound"> Alarm sound at the stop-loss</label>
       <p class="fine">With Game Auto Bet tracking on, the alarm keeps sounding until you turn off Auto Bet in the game.</p>
+      <label for="setRemind">Break reminder</label>
+      <select id="setRemind"><option value="0">Off</option><option value="30">After 30 minutes</option><option value="60">After 1 hour</option><option value="120">After 2 hours</option></select>
+      <p class="fine">A reminder on this page once the game has been open this long.</p>
       <div class="warn" id="settingsError" hidden></div>
       <div class="dialog-actions">
         <button type="button" class="secondary-btn" id="cancelSettings">Cancel</button>
@@ -175,6 +225,12 @@
       </div>
     </form>
   </dialog>
+  <dialog id="diag" aria-labelledby="diagTitle">
+    <h2 id="diagTitle">What the monitor sees in the game window</h2>
+    <div id="diagBox">Checking…</div>
+    <div class="dialog-actions"><button type="button" class="secondary-btn" id="diagClose">Close</button></div>
+  </dialog>
+  <div class="remind" id="remind" hidden><span id="remindText"></span><button type="button" id="remindOk">OK</button></div>
   <p class="lead">Enter your game's address and click Start live capture. A game window opens: log in there as usual and open Aviator. Every finished round shows up below.</p>
 
   <form class="bar" id="form">
@@ -182,7 +238,7 @@
     <button id="toggle" type="submit">Start live capture</button>
   </form>
 
-  <div class="status" id="status"><span class="dot"></span><span id="statusText">Not capturing.</span></div>
+  <div class="status" id="status"><span class="dot"></span><span id="statusText" class="grow">Not capturing.</span><button type="button" id="diagBtn" hidden>Why no rounds?</button></div>
 
   <div class="layout">
   <div>
@@ -248,10 +304,12 @@
         <div class="tile"><span>Lost</span><strong id="rLost" class="bad">0</strong></div>
         <div class="tile"><span>Net</span><strong id="rNet">₹0</strong></div>
       </div>
+      <div class="rline small" id="rStats"></div>
       <div class="rline" id="rLine"></div>
       <div class="rline" id="rReal"></div>
       <div class="meter" aria-hidden="true"><div id="rStopBar"></div></div>
       <div class="rline small" id="rStop"></div>
+      <div class="viz" id="rEquity" style="margin-top:12px"></div>
       <div class="rtable-wrap">
         <table class="rtable">
           <thead><tr><th>Time</th><th>Bet</th><th>Exit</th><th>Plane</th><th>Result</th></tr></thead>
@@ -259,8 +317,29 @@
         </table>
       </div>
     </div>
+
+    <h2 class="results-title"><span>Past days <small class="empty" id="daysNote"></small></span></h2>
+    <div class="rtable-wrap">
+      <table class="rtable">
+        <thead><tr><th>Day</th><th>Bets</th><th>Win rate</th><th>Bet in total</th><th>Biggest drop</th><th>Net</th></tr></thead>
+        <tbody id="daysRows"><tr><td colspan="6" class="empty">Days you finish appear here when you start a new day.</td></tr></tbody>
+      </table>
+    </div>
   </aside>
   </div>
+
+  <section class="analysis viz" id="analysis">
+    <h2><span>Analysis of your captured rounds <small class="empty" id="aSite"></small></span>
+      <span class="sizes" id="aSizes"><button type="button" data-size="200">Last 200</button><button type="button" data-size="1000">Last 1,000</button><button type="button" data-size="5000">Last 5,000</button><button type="button" data-size="0">All</button></span></h2>
+    <div class="atiles" id="aTiles"></div>
+    <div class="agrid">
+      <div class="panel wide"><h3>Latest rounds: how high each one went</h3><div id="aRounds"></div></div>
+      <div class="panel"><h3>Where rounds ended, next to the game's odds</h3><div id="aDist"></div></div>
+      <div class="panel"><h3>Do your rounds match the game's odds?</h3><div class="table-scroll" id="aLadder"></div></div>
+      <div class="panel"><h3>Is there any pattern? (checks against chance)</h3><div id="aChecks"></div></div>
+      <div class="panel"><h3 id="aBackTitle">If you had bet the same on every round</h3><div id="aBackChart"></div><div id="aBack"></div></div>
+    </div>
+  </section>
 </main>
 <script>
   const $ = id => document.getElementById(id);
@@ -271,6 +350,7 @@
   try { const saved = localStorage.getItem('monitorUrl'); if (saved) $('url').value = saved; } catch {}
 
   function statusText(c) {
+    if (c.status === 'live' && c.stale) return `No update from the game for ${ago(Date.now() - c.lastSnapshotAt).replace(' ago', '')}. The game may be frozen, logged out or offline: check the game window.`;
     if (c.status === 'live') return `Live${c.source ? ` · reading ${c.source}` : ''} · last new round ${c.lastRoundAt ? ago(Date.now() - c.lastRoundAt) : 'not yet'}`;
     if (c.status === 'waiting') {
       const late = Date.now() - c.startedAt > 30000;
@@ -282,7 +362,10 @@
   function render() {
     if (!state) return;
     const c = state.capture, running = ['starting', 'waiting', 'live'].includes(c.status);
-    $('status').className = `status ${localError ? 'error' : c.status}`;
+    $('status').className = `status ${localError ? 'error' : c.stale ? 'stale' : c.status}`;
+    $('diagBtn').hidden = !(c.status === 'waiting' && Date.now() - c.startedAt > 30000 || c.stale);
+    renderRemind(c, running);
+    if (typeof AnalysisUI !== 'undefined') { AnalysisUI.update(); AnalysisUI.updateSession(); }
     $('statusText').textContent = localError || statusText(c);
     if (!localError && c.status === 'waiting' && c.sawPlain) {
       const warn = document.createElement('small');
@@ -395,19 +478,26 @@
   // and how often do you finish ahead? Cached, because the page re-renders on every round.
   const riskCache = new Map();
   function riskSim(budget, stake, p) {
-    const key = `${budget}|${stake}|${p}|${stopShare()}`;
+    const key = `${budget}|${stake}|${target}|${stopShare()}`;
     if (riskCache.has(key)) return riskCache.get(key);
-    const stop = budget * stopShare(), runs = 3000;
-    let stopped = 0, ahead = 0;
-    for (let r = 0; r < runs; r++) {
-      let net = 0;
-      for (let i = 0; i < 50; i++) {
-        if (-net >= stop || stake > budget + net) { stopped++; break; }
-        net += Math.random() < p ? stake * (target - 1) : -stake;
+    // Exact, not simulated: alive[w] is the chance of having w wins so far without having
+    // reached the stop-loss (or run short of money for the next bet).
+    const stop = budget * stopShare(), win = stake * (target - 1);
+    const over = (w, i) => { const net = w * win - (i - w) * stake; return -net >= stop || stake > budget + net; };
+    let alive = [1], stopped = 0;
+    for (let i = 0; i < 50; i++) {
+      const next = new Array(i + 2).fill(0);
+      for (let w = 0; w <= i; w++) {
+        if (!alive[w]) continue;
+        if (over(w, i)) { stopped += alive[w]; continue; }
+        next[w + 1] += alive[w] * p;
+        next[w] += alive[w] * (1 - p);
       }
-      if (net > 0) ahead++;
+      alive = next;
     }
-    const out = {stopped: stopped / runs, ahead: ahead / runs};
+    let ahead = 0;
+    alive.forEach((pr, w) => { if (over(w, 50)) stopped += pr; else if (w * win - (50 - w) * stake > 0) ahead += pr; });
+    const out = {stopped, ahead};
     riskCache.set(key, out);
     return out;
   }
@@ -569,6 +659,7 @@
     $('setPause').value = st.pauseRounds;
     for (const r of document.querySelectorAll('#setStop input')) r.checked = Number(r.value) === st.stopLossShare;
     $('setSound').checked = st.alarmSound !== false;
+    $('setRemind').value = st.remindMinutes ?? 60;
     $('settingsError').hidden = true;
     $('settings').showModal();
   }
@@ -577,7 +668,7 @@
   $('settingsForm').addEventListener('submit', async e => {
     e.preventDefault();
     const stop = document.querySelector('#setStop input:checked');
-    const r = await post('/api/settings', {pauseRounds: Number($('setPause').value), stopLossShare: stop ? Number(stop.value) : undefined, alarmSound: $('setSound').checked});
+    const r = await post('/api/settings', {pauseRounds: Number($('setPause').value), stopLossShare: stop ? Number(stop.value) : undefined, alarmSound: $('setSound').checked, remindMinutes: Number($('setRemind').value)});
     if (!r.ok) { $('settingsError').textContent = r.error; $('settingsError').hidden = false; return; }
     $('settings').close();
   });
@@ -644,6 +735,34 @@
   });
   $('alarmMute').addEventListener('click', () => { muted = true; });
 
+  // ---- Break reminder: the game has been open for the time set in Settings ----
+  let remindDismissed = 0;
+  function renderRemind(c, running) {
+    const mins = state.settings ? state.settings.remindMinutes : 0;
+    const open = running ? (Date.now() - c.startedAt) / 60000 : 0;
+    // After OK it comes back once the same time has passed again.
+    const due = mins > 0 && open >= mins && Date.now() - remindDismissed > mins * 60000;
+    $('remind').hidden = !due;
+    if (due) $('remindText').textContent = `The game has been open for ${open >= 120 ? `${Math.floor(open / 60)} hours` : `${Math.round(open)} minutes`}. A good moment for a break.`;
+  }
+  $('remindOk').addEventListener('click', () => { remindDismissed = Date.now(); $('remind').hidden = true; });
+
+  // ---- Why no rounds? What each frame of the game window contains ----
+  $('diagClose').addEventListener('click', () => $('diag').close());
+  $('diagBtn').addEventListener('click', async () => {
+    $('diagBox').textContent = 'Checking…';
+    $('diag').showModal();
+    let d;
+    try { d = await (await fetch('/api/diagnose')).json(); } catch { d = {ok: false, error: 'No answer from the monitor.'}; }
+    if (!d.ok) { $('diagBox').textContent = d.error; return; }
+    const found = d.frames.some(f => (f.candidates || []).some(c => c.marked && c.visible));
+    $('diagBox').textContent = (found
+      ? 'A results list is on screen. If rounds still do not appear, reload the game in the game window.\n\n'
+      : 'No results list (numbers like "1.23x") is on screen in the game window. Log in, open Aviator, and keep its results strip visible. A game drawn only on a canvas cannot be read.\n\n') +
+      d.frames.map(f => `${f.url || '(empty frame)'}\n  ${f.error ? `could not be read: ${f.error}` : f.missing ? 'not checked yet' :
+        `lists that look like results: ${(f.candidates || []).length}, canvases: ${f.canvases}` + (f.candidates || []).map(c => `\n   - ${c.marked ? 'with ×' : 'plain numbers'}, ${c.count} entries${c.visible ? '' : ', hidden'}: ${c.sample.slice(0, 5).join(' ')}`).join('')}`).join('\n');
+  });
+
   // ---- My results (right column) ----
   const clock = t => new Date(t).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
   function renderResults() {
@@ -657,6 +776,8 @@
     $('rLine').innerHTML = ses.bets
       ? `Win rate <b>${pct(ses.wins / ses.bets)}</b> · bet in total <b>${money(ses.wagered)}</b> · money left <b>${money(ses.left)}</b> of ${money(ses.budget)}`
       : `Money left <b>${money(ses.left)}</b> of ${money(ses.budget)}`;
+    const stt = ses.stats;
+    $('rStats').innerHTML = ses.bets ? `Most losses in a row <b>${stt.longestLosses}</b> · biggest drop from a high point <b>−${money(stt.maxDrawdown)}</b>` : '';
     $('rReal').innerHTML = ses.balance === null ? 'Game balance: not read yet (open the game while capturing).'
       : `Game balance <b>${money(ses.balance)}</b>${ses.realNet !== null ? ` · real change today <b class="${ses.realNet > 0 ? 'good' : ses.realNet < 0 ? 'bad' : ''}">${signed(ses.realNet)}</b>` : ''}`;
     const used = Math.min(1, Math.max(0, -ses.net, ses.realNet !== null ? -ses.realNet : 0) / ses.stopLoss);
@@ -762,5 +883,6 @@
   setInterval(render, 5000); // Keeps "last new round … ago" current.
   connect();
 </script>
+<script src="/analysis.js"></script>
 </body>
 </html>

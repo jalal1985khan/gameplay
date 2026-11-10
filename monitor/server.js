@@ -101,15 +101,20 @@ function createMonitor({
     const gameAutoPlay = slots.some(x => x.autoPlay === true);
     // Mismatches between what is tracked and what the game is set to.
     const warnings = [];
-    if (balance === 0) warnings.push('Your game balance is ₹0.00, so the game cannot place any bet. Bets recorded here are practice only, not real play.');
-    if (autoBet && slots.length) {
+    if (balance === 0) warnings.push(`Your game balance is ₹0.00, so the game cannot place any bet.${autoBet && !autoBet.follow || pending ? ' Bets recorded here are practice only, not real play.' : ''}`);
+    const follow = !!(autoBet && autoBet.follow);
+    if (follow) {
+      // Tracking copies the game, so only what stops the game from betting is worth a warning.
+      if (slots.some(x => x.autoPlay && x.autoCashOut === false)) warnings.push('Auto Cash Out is OFF in the game, so a bet has no fixed exit. Those bets are listed without a result; your game balance shows what they did.');
+      if (fundsSeen !== null && fundsSeen > 0 && fundsSeen < autoBet.stake) warnings.push(`Your game balance (₹${fundsSeen}) is less than the game's bet (₹${autoBet.stake}), so the game is not betting. These rounds are not counted.`);
+    } else if (autoBet && slots.length) {
       const real = slots.find(x => x.autoPlay) || slots[0];
       if (real.bet !== null && real.bet !== autoBet.stake) warnings.push(`The game's bet is ₹${real.bet}, but you are tracking ₹${autoBet.stake}. Press "Use the game's settings" or change the game's bet.`);
       if (real.autoCashOut === false) warnings.push('Auto Cash Out is OFF in the game, so it will not exit at your target by itself.');
       else if (real.target !== null && real.target !== autoBet.target) warnings.push(`The game's Auto Cash Out is ${real.target}×, but you are tracking ${autoBet.target}×.`);
       if (!slots.some(x => x.autoPlay) && slots.some(x => x.autoPlay === false)) warnings.push('Auto Play looks OFF in the game, so it may not be betting every round.');
     }
-    if (balance !== null && balance > 0 && autoBet && balance < autoBet.stake) warnings.push(`Your game balance (₹${balance}) is less than the bet, so the game cannot place it.`);
+    if (!follow && balance !== null && balance > 0 && autoBet && balance < autoBet.stake) warnings.push(`Your game balance (₹${balance}) is less than the bet, so the game cannot place it.`);
     const stats = Analysis.sessionStats(session.bets);
     if (stats.chaseRun >= 2) warnings.push('You raised your bet after each of your last losses. That is chasing losses: go back to your planned bet, or stop for today.');
     else if (stats.chases >= 3) warnings.push(`You have raised your bet right after a loss ${stats.chases} times today.`);
@@ -119,7 +124,9 @@ function createMonitor({
       balance, balanceStart, realNet, realStopped, warnings,
       game: panel ? {slots, gameAutoPlay, at: panel.at} : null,
       bets: done.length, wins: done.filter(b => b.result === 'won').length,
-      pending, awaiting, cooldownLeft, stopped, autoBet,
+      pending, awaiting, cooldownLeft, stopped, autoBet, follow,
+      // The game's bet panel can be read, so tracking can start and stop with the game's Auto Play.
+      canFollow: slots.some(x => x.autoPlay !== null),
       // Stop-loss reached while the game is still betting by itself: sound the alarm.
       alarm: stopped && (!!autoBet || gameAutoPlay),
       canBet: !pending && !awaiting && !autoBet && !cooldownLeft && !stopped && capture.status === 'live',
@@ -180,6 +187,21 @@ function createMonitor({
     broadcast();
     return {ok: true};
   }
+  // Follow the game: tracking starts when Auto Play is switched on in the game, uses the game's
+  // own bet and Auto Cash Out target, and stops when Auto Play is switched off. Read-only.
+  // Tracking started by hand (startAutoBet) is left alone.
+  function followGame() {
+    const playing = panel ? panel.slots.filter(x => x.autoPlay === true && x.bet > 0) : [];
+    const auto = session.autoBet;
+    if (playing.length && !auto) session.autoBet = {follow: true, stake: playing[0].bet, target: playing[0].target, since: Date.now()};
+    else if (playing.length && auto.follow) {
+      if (auto.stake === playing[0].bet && auto.target === playing[0].target) return false;
+      Object.assign(auto, {stake: playing[0].bet, target: playing[0].target});
+    } else if (!playing.length && auto && auto.follow && panel && panel.slots.length) session.autoBet = null;
+    else return false;
+    return true;
+  }
+
   function stopAutoBet() {
     session.autoBet = null;
     saveSession();
@@ -211,6 +233,7 @@ function createMonitor({
     archiveDay();
     session = newSession(budget);
     session.balanceStart = panel ? panel.balance : null;
+    followGame(); // Auto Play still on in the game: the new day is tracked from its first round.
     saveSession();
     broadcast();
     return {ok: true};
@@ -229,9 +252,14 @@ function createMonitor({
   }
 
   // New rounds arrived (oldest first). gap: rounds were missed before them.
-  function settleBets(fresh, gap) {
+  // total: all rounds being stored now. It is more than fresh when the list was read for the first
+  // time (or again after Clear): rounds already on it finished before, so no bet rode on them.
+  function settleBets(fresh, gap, total = fresh.length) {
+    const earlier = total - fresh.length;
+    seen += earlier;
+    if (Number.isFinite(session.lastLossRound)) session.lastLossRound += earlier; // The pause counts live rounds only.
     const pending = session.bets.find(b => b.result === 'pending');
-    if (pending) {
+    if (pending && (gap || fresh.length)) {
       if (gap) pending.result = 'unknown'; // Its round may be one of the missed ones.
       else {
         const round = fresh[0], roundNo = seen + 1;
@@ -243,7 +271,27 @@ function createMonitor({
         }
       }
     }
-    if (session.autoBet) {
+    if (session.autoBet && session.autoBet.follow) {
+      // One bet per game slot with Auto Play on, at the game's own amount and Auto Cash Out target.
+      const plays = (panel ? panel.slots : []).filter(x => x.autoPlay === true && x.bet > 0)
+        .map(x => ({stake: x.bet, target: x.autoCashOut !== false && x.target > 1 ? x.target : null}));
+      // The most money seen since the last round: a bet above it cannot have been placed.
+      let funds = fundsSeen === null ? Infinity : fundsSeen;
+      const base = {mode: 'autobet', follow: true, at: Date.now()};
+      for (const {stake, target} of plays) {
+        if (funds < stake) continue;
+        funds -= stake;
+        if (gap) session.bets.push({...base, stake, target, result: 'unknown'});
+        else fresh.forEach((round, i) => {
+          // No Auto Cash Out: where the person cashed out is not known, so the bet has no result
+          // here and the game balance carries the real outcome.
+          if (target === null) return session.bets.push({...base, stake, target, round, roundNo: seen + 1 + i, result: 'unknown', manualExit: true});
+          const won = round >= target;
+          session.bets.push({...base, stake, target, round, roundNo: seen + 1 + i, cashedAt: won ? target : null,
+            result: won ? 'won' : 'lost', profit: won ? Math.round(stake * (target - 1) * 100) / 100 : -stake});
+        });
+      }
+    } else if (session.autoBet) {
       const {stake, target} = session.autoBet;
       if (gap) {
         // Some rounds passed unseen: their bets can't be checked.
@@ -256,11 +304,16 @@ function createMonitor({
         });
       }
     }
+    if (fresh.length || gap) fundsSeen = panel ? panel.balance : null;
     seen += fresh.length;
     saveSession();
   }
   // The game's own bet panel as last read (balance, bet slots), or null when not seen.
   let panel = null;
+  let baseline = null; // See clear().
+  // The highest game balance read since the last finished round (the bet is taken from the balance
+  // before the round and the win is paid after it), or null when no balance was read.
+  let fundsSeen = null;
   let capture = {status: 'stopped', note: '', url: '', startedAt: 0, lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false};
   let context = null, stopping = false;
   const clients = new Set();
@@ -374,6 +427,8 @@ function createMonitor({
       button: typeof (x && x.button) === 'string' ? x.button.slice(0, 40) : null,
     })) : [];
     panel = {balance: num(p.balance), slots, at: Date.now()};
+    if (panel.balance !== null) fundsSeen = Math.max(fundsSeen ?? 0, panel.balance);
+    if (followGame()) saveSession();
     // The day's starting balance: the first one seen after the day began.
     if (panel.balance !== null && (session.balanceStart === undefined || session.balanceStart === null)) {
       session.balanceStart = panel.balance;
@@ -397,9 +452,18 @@ function createMonitor({
     const newCount = Number.isInteger(snap.newCount) ? snap.newCount : null;
     const now = Date.now();
     const {fresh, gap} = AviatorMatch.newRounds(history.values, values, newCount);
+    // Rounds that finished just now, for the tracked bets. With nothing stored yet the whole list
+    // is new to the history, but only rounds after the ones known before Clear are live.
+    let live = fresh, liveGap = gap;
+    if (!history.values.length) {
+      const r = baseline ? AviatorMatch.newRounds(baseline, values, newCount) : {fresh: [], gap: false};
+      live = r.gap ? [] : r.fresh;
+      liveGap = r.gap;
+    }
     const patch = {...extra, lastSnapshotAt: now, status: 'live', note: ''};
     if (fresh.length) {
-      settleBets(fresh, gap);
+      baseline = null;
+      settleBets(live, liveGap, fresh.length);
       const next = AviatorMatch.append(history.values, history.gaps, fresh, gap, MAX_ROUNDS);
       const times = [...history.times, ...fresh.map(() => now)].slice(-next.captured.length);
       store.append(history.origin, fresh, now, gap && history.values.length > 0);
@@ -429,6 +493,7 @@ function createMonitor({
     if (context) await stop('');
     // Each game site has its own history: a different site shows its own rounds, and the
     // other site's rounds stay saved for the next time it is opened.
+    baseline = null;
     if (history.origin !== url.origin) {
       history = store.load(url.origin);
       // Bets waiting on the other site's rounds can't be matched here.
@@ -476,7 +541,7 @@ function createMonitor({
   }
 
   async function stop(note = 'Capture stopped.') {
-    castPage = null; castSession = null; frame = null; gamePage = null; panel = null;
+    castPage = null; castSession = null; frame = null; gamePage = null; panel = null; fundsSeen = null;
     const ctx = context;
     context = null;
     stopping = true;
@@ -529,6 +594,9 @@ function createMonitor({
   }
 
   function clear() {
+    // Remember the newest rounds (not shown, not saved) so the next read of the game's list can
+    // tell which rounds are new and which were simply still on the list.
+    baseline = capture.status === 'live' && history.values.length ? history.values.slice(-300) : null;
     store.clear(history.origin);
     history = {origin: history.origin, values: [], times: [], gaps: []};
     broadcast();

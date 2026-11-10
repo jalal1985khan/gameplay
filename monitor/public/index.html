@@ -302,7 +302,7 @@
         <div class="tile"><span>Bets</span><strong id="rBets">0</strong></div>
         <div class="tile"><span>Won</span><strong id="rWon" class="good">0</strong></div>
         <div class="tile"><span>Lost</span><strong id="rLost" class="bad">0</strong></div>
-        <div class="tile"><span>Net</span><strong id="rNet">₹0</strong></div>
+        <div class="tile"><span id="rNetLabel">Net</span><strong id="rNet">₹0</strong></div>
       </div>
       <div class="rline small" id="rStats"></div>
       <div class="rline" id="rLine"></div>
@@ -593,6 +593,8 @@
       ? `In the game, turn on Auto Cash Out at ${target.toFixed(2)}. The next round decides the bet: a win if the plane reaches ${target}×.`
       : mode === 'manual'
       ? `Press Cash Out in the game yourself (plan: ${target}×). After the round, enter where you cashed out.`
+      : ses && ses.canFollow
+      ? `Tracking follows the game. In the game's Auto tab set your bet and Auto Cash Out, then switch Auto Play on: tracking starts by itself with the game's own bet and target, and stops when you switch Auto Play off. An alarm sounds at your stop-loss.`
       : `In the game's Auto tab: set the bet to ${money(stake)}, turn on Auto Cash Out at ${target.toFixed(2)}, then turn on Auto Bet. Press the button below: every round is recorded, and an alarm sounds at your stop-loss.`;
     const msg = $('betMsg'), btn = $('betBtn');
     if (!ses) { btn.hidden = true; msg.textContent = ''; return; }
@@ -610,7 +612,14 @@
     if ($('warnings').dataset.html !== wHtml) { $('warnings').innerHTML = wHtml; $('warnings').dataset.html = wHtml; }
     const last = ses.recent[0];
     let html = '', cls = '';
-    if (ses.autoBet) {
+    if (ses.follow) {
+      cls = ses.stopped ? 'stop' : 'wait';
+      const a = ses.autoBet;
+      html = ses.stopped ? 'Stop-loss reached. Switch Auto Play off in the game now.'
+        : `Following the game since ${clock(a.since)}: ${money(a.stake)} ${a.target > 1 ? `with Auto Cash Out at ${a.target}×` : 'with no Auto Cash Out'}. Switch Auto Play off in the game to stop.`;
+    } else if (mode === 'autobet' && ses.canFollow && !ses.autoBet && !ses.pending && !ses.awaiting) {
+      html = state.capture.status === 'live' ? 'Auto Play is off in the game, so nothing is being bet. Switch it on there and tracking starts by itself.' : 'Start live capture and open the game first.';
+    } else if (ses.autoBet) {
       cls = ses.stopped ? 'stop' : 'wait';
       html = `${ses.stopped ? 'Stop-loss reached. Turn off Auto Bet in the game now.' : `Tracking every round: ${money(ses.autoBet.stake)} at ${ses.autoBet.target}× (since ${clock(ses.autoBet.since)}).`}` +
         `<br><button type="button" id="autoOff">I turned off Auto Bet in the game</button>`;
@@ -638,7 +647,8 @@
       cls = 'won';
       html = `Won ${signed(last.profit)} (cashed out at ${last.cashedAt}×; the plane reached ${last.round}×).`;
     }
-    btn.hidden = !((mode === 'autobet' ? ses.canAutoBet : ses.canBet) && stake <= ses.left);
+    // Where the game's panel can be read, Auto Bet tracking follows the game: no button needed.
+    btn.hidden = !((mode === 'autobet' ? ses.canAutoBet && !ses.canFollow : ses.canBet) && stake <= ses.left);
     btn.textContent = mode === 'auto' ? `I placed ${money(stake)} with auto cash-out at ${target}×`
       : mode === 'manual' ? `I placed ${money(stake)} – I'll cash out myself`
       : `Game Auto Bet is on: ${money(stake)} at ${target}× – track every round`;
@@ -771,8 +781,11 @@
     $('rBets').textContent = ses.bets;
     $('rWon').textContent = ses.wins;
     $('rLost').textContent = ses.losses;
-    $('rNet').textContent = signed(ses.net);
-    $('rNet').className = ses.net > 0 ? 'good' : ses.net < 0 ? 'bad' : '';
+    // While following the game, the day's result is the real change in the game balance.
+    const realDay = ses.follow && ses.realNet !== null, dayNet = realDay ? ses.realNet : ses.net;
+    $('rNetLabel').textContent = realDay ? 'Net (game balance)' : 'Net';
+    $('rNet').textContent = signed(dayNet);
+    $('rNet').className = dayNet > 0 ? 'good' : dayNet < 0 ? 'bad' : '';
     $('rLine').innerHTML = ses.bets
       ? `Win rate <b>${pct(ses.wins / ses.bets)}</b> · bet in total <b>${money(ses.wagered)}</b> · money left <b>${money(ses.left)}</b> of ${money(ses.budget)}`
       : `Money left <b>${money(ses.left)}</b> of ${money(ses.budget)}`;
@@ -785,13 +798,14 @@
     $('rStopBar').style.background = used >= 1 ? 'var(--low)' : used >= 0.6 ? 'var(--warn)' : 'var(--ok)';
     $('rStop').textContent = ses.stopped ? `Stop-loss of ${money(ses.stopLoss)} reached: done for today.` : `${pct(used)} of today's stop-loss (${money(ses.stopLoss)}) used`;
     const rows = ses.all.map(b => {
-      const exit = b.result === 'won' ? `${b.cashedAt}×` : b.mode === 'manual' ? (b.result === 'lost' ? 'no cash-out' : 'manual') : `auto ${b.target}×`;
-      const tag = (b.mode === 'autobet' ? ' <span class="tag">auto bet</span>' : b.mode === 'manual' && b.result === 'won' ? ' <span class="tag">manual</span>' : '') +
+      const exit = b.result === 'won' ? `${b.cashedAt}×` : b.mode === 'manual' ? (b.result === 'lost' ? 'no cash-out' : 'manual') : b.target ? `auto ${b.target}×` : 'by hand';
+      const tag = (b.follow ? ' <span class="tag">game auto play</span>' : b.mode === 'autobet' ? ' <span class="tag">auto bet</span>' : b.mode === 'manual' && b.result === 'won' ? ' <span class="tag">manual</span>' : '') +
         (b.practice ? ' <span class="tag" title="The game balance was below this bet, so it could not be real">practice</span>' : '');
       const res = b.result === 'won' ? `<b class="good">Won ${signed(b.profit)}</b>`
         : b.result === 'lost' ? `<b class="bad">Lost −${money(b.stake)}</b>`
         : b.result === 'pending' ? '<span class="tag">waiting…</span>'
         : b.result === 'awaiting' ? '<span class="tag">enter cash-out</span>'
+        : b.manualExit ? '<span class="tag" title="Auto Cash Out was off, so the exit is not known. The game balance shows the real result.">see game balance</span>'
         : '<span class="tag">not checked (rounds missed)</span>';
       return `<tr><td>${clock(b.at)}</td><td>${money(b.stake)}</td><td>${exit}${tag}</td><td>${b.round ? `${b.round}×` : '—'}</td><td>${res}</td></tr>`;
     }).join('');

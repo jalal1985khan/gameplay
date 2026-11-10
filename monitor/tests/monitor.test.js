@@ -321,15 +321,70 @@ test("reads the game's real balance and bet panel: warnings, practice bets, real
   assert.equal(ses.alarm, false);
 });
 
+test("follows the game's Auto Play: starts, uses the game's bet and target, skips bets the balance can't cover, stops", async () => {
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  const inGame = (fn, arg) => gameFrame.evaluate(fn, arg);
+  const round = async v => {
+    const before = (await state()).count;
+    await inGame(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
+    return until(state, s => s.count > before);
+  };
+  const balance = async v => {
+    await inGame(x => { document.querySelector('.userBalanceMoney').textContent = '₹' + x.toFixed(2); }, v);
+    return until(state, s => s.session.balance === v);
+  };
+  await post('/api/autobet', {on: false});
+  await balance(1000);
+  await post('/api/session', {budget: 1000});
+  let ses = (await state()).session;
+  assert.deepEqual([ses.follow, ses.autoBet, ses.canFollow], [false, null, true], 'Auto Play is off in the game: nothing is tracked');
+  // Auto Play goes on in the game, with a ₹2 bet and Auto Cash Out at 1.5×.
+  await inGame(() => { document.querySelector('.autoPlayButton').classList.add('active'); });
+  ses = (await until(state, s => s.session.follow)).session;
+  assert.deepEqual([ses.autoBet.stake, ses.autoBet.target], [2, 1.5]);
+  assert.equal(ses.warnings.length, 0, ses.warnings.join(' | '));
+  ses = (await round(1.6)).session;
+  assert.deepEqual([ses.bets, ses.net, ses.all[0].follow, ses.all[0].practice], [1, 1, true, undefined]);
+  // The bet is changed in the game: tracking uses the new amount.
+  await inGame(() => { document.querySelector('.betSectionInput').value = '5'; });
+  await balance(999); // Any change on the panel is read; the game took the next bet.
+  ses = (await until(state, s => s.session.autoBet.stake === 5)).session;
+  ses = (await round(1.2)).session;
+  assert.deepEqual([ses.bets, ses.net, ses.all[0].stake, ses.all[0].result], [2, -4, 5, 'lost']);
+  assert.equal(ses.realNet, -1);
+  // The last bet empties the balance: it still counts, because the money was there before the round.
+  await balance(5); await balance(0);
+  ses = (await round(1.1)).session;
+  assert.deepEqual([ses.bets, ses.net], [3, -9]);
+  // Nothing left: the game cannot bet, so the next round is not counted.
+  ses = (await round(3)).session;
+  assert.equal(ses.bets, 3);
+  // Auto Cash Out off: the bet is listed without a result.
+  await balance(500);
+  await inGame(() => { document.querySelector('.autoPlayTagInput').disabled = true; });
+  ses = (await until(state, s => s.session.autoBet && s.session.autoBet.target === null || s.session.game.slots[0].autoCashOut === false)).session;
+  ses = (await round(2)).session;
+  assert.deepEqual([ses.bets, ses.all[0].manualExit, ses.all[0].result], [3, true, 'unknown']);
+  assert.ok(ses.warnings.some(w => /Auto Cash Out is OFF/.test(w)));
+  // Auto Play goes off in the game: tracking stops by itself.
+  await inGame(() => { document.querySelector('.autoPlayButton').classList.remove('active'); document.querySelector('.autoPlayTagInput').disabled = false; });
+  ses = (await until(state, s => !s.session.autoBet)).session;
+  assert.deepEqual([ses.follow, ses.autoBet], [false, null]);
+  const n = ses.all.length;
+  ses = (await round(4)).session;
+  assert.equal(ses.all.length, n);
+  await balance(1000);
+});
+
 test('stop closes the game window; history is kept and saved', async () => {
   await post('/api/stop');
   const s = await state();
   assert.equal(s.capture.status, 'stopped');
-  assert.equal(s.count, 28);
+  assert.equal(s.count, 34);
   assert.equal(s.session.canBet, false, 'no bets while not capturing');
   // Every round is already in the site's log: one line each, written as it was captured.
   const log = fs.readFileSync(path.join(dir, 'data', 'rounds', `localhost_${gamePort}.ndjson`), 'utf8').trim().split('\n').map(l => JSON.parse(l));
-  assert.equal(log.length, 28);
+  assert.equal(log.length, 34);
   assert.deepEqual(log.slice(0, 3).map(r => r.v), [1.2, 3.45, 1]);
 });
 
@@ -338,7 +393,7 @@ test('analysis of the captured rounds: odds table, bands, checks and a replayed 
   const values = (await state()).recent.slice(0, 11).map(r => r.v).reverse();
   assert.equal(a.ok, true);
   assert.equal(a.rounds, 11);
-  assert.equal(a.total, 28);
+  assert.equal(a.total, 34);
   const hits = values.filter(v => v >= 2).length;
   assert.equal(a.base.hits, hits);
   assert.equal(a.ladder.find(r => r.target === 2).hits, hits);
@@ -352,7 +407,7 @@ test('analysis of the captured rounds: odds table, bands, checks and a replayed 
   assert.equal(a.backtest.points.at(-1).net, a.backtest.net);
   // Bad input falls back to safe values instead of failing.
   const b = await (await fetch(base + '/api/analysis?target=abc&size=-4&stake=0')).json();
-  assert.deepEqual([b.target, b.size, b.backtest.stake, b.rounds], [2, 0, 10, 28]);
+  assert.deepEqual([b.target, b.size, b.backtest.stake, b.rounds], [2, 0, 10, 34]);
   // The page and its chart script are served.
   assert.match(await (await fetch(base + '/analysis.js')).text(), /AnalysisUI/);
 });
@@ -371,7 +426,7 @@ test('finished days are kept; each game site keeps its own rounds', async () => 
   await post('/api/stop');
   await post('/api/start', {url: `http://localhost:${gamePort}/`});
   const back = await state();
-  assert.ok(back.count >= 28, 'the first site still has its rounds');
+  assert.ok(back.count >= 34, 'the first site still has its rounds');
   assert.equal(back.site, `http://localhost:${gamePort}`);
   await post('/api/stop');
 });
@@ -383,7 +438,7 @@ test('a monitor started again reads its rounds back from the log; a live game th
     const get = () => fetch(url + '/api/state').then(r => r.json());
     const s = await get();
     assert.equal(s.count, (await state()).count);
-    assert.ok(s.count >= 28);
+    assert.ok(s.count >= 34);
     assert.equal(s.site, `http://localhost:${gamePort}`);
     // The fake game stops adding rounds after five: soon nothing changes on its page.
     await fetch(url + '/api/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url: `http://localhost:${gamePort}/`})});
@@ -411,6 +466,19 @@ test('never records betting odds; records the x-marked Aviator list once it appe
   assert.equal(s.capture.source, `127.0.0.1:${gamePort}`);
   assert.deepEqual(s.recent.map(x => x.v).reverse(), [1.2, 3.45, 1, 12.3, 2.05, 1.71, 4.44, 1.08, 2.5, 1.99, 7.77]);
   assert.equal(s.breaks, 0);
+  // Clear while the game's Auto Bet is tracked: the rounds still on the game's list are stored
+  // again, but only the round that finishes afterwards counts as a bet.
+  await post('/api/session', {budget: 1000});
+  await post('/api/autobet', {on: true, stake: 10, target: 2});
+  await post('/api/clear');
+  assert.equal((await state()).count, 0);
+  const frame = monitor._context().pages().flatMap(p => p.frames()).find(f => f.url().includes('/game'));
+  await frame.evaluate(() => { const d = document.createElement('div'); d.textContent = '1.50x'; document.getElementById('list').prepend(d); });
+  const cleared = await until(state, x => x.count >= 12);
+  assert.equal(cleared.count, 12);
+  assert.equal(cleared.session.bets, 1, 'one live round, one bet');
+  assert.deepEqual([cleared.session.all[0].round, cleared.session.all[0].result, cleared.session.net], [1.5, 'lost', -10]);
+  await post('/api/autobet', {on: false});
   // Diagnostics list each frame and the lists it found.
   const d = await (await fetch(base + '/api/diagnose')).json();
   assert.equal(d.ok, true);

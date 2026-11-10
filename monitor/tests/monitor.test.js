@@ -63,6 +63,7 @@ after(async () => {
   fs.rmSync(dir, {recursive: true, force: true});
 });
 
+const setTimeoutP = ms => new Promise(r => setTimeout(r, ms));
 const post = (p, body, headers = {}) => fetch(base + p, {method: 'POST', headers: {'Content-Type': 'application/json', ...headers}, body: JSON.stringify(body || {})});
 const state = () => fetch(base + '/api/state').then(r => r.json());
 
@@ -748,6 +749,83 @@ test('autoCutOff stops Auto Play and cancels waiting bets automatically on stop-
   assert.equal(forced.slots[0].autoPlay, false);
   assert.equal(forced.slots[0].button, 'bet');
   await post('/api/stop');
+});
+
+test('autopilot: starts the game\'s Auto Play with the set bet, pauses after losses in a row, stops for the day at the loss limit', async () => {
+  await post('/api/start', {url: `http://localhost:${gamePort}/`});
+  await until(state, s => s.capture.status === 'live' && s.latest === 7.77 && s.session.game && s.session.game.slots.length > 0);
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  await wireButtons(gameFrame);
+  const pilot = body => post('/api/autopilot', body).then(r => r.json());
+  const setup = body => post('/api/autopilot/settings', body).then(r => r.json());
+  const round = async v => {
+    const before = (await state()).count;
+    await gameFrame.evaluate(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
+    return until(state, s => s.count > before);
+  };
+  const balance = async v => {
+    await gameFrame.evaluate(x => { document.querySelector('.userBalanceMoney').textContent = '₹' + x.toFixed(2); }, v);
+    return until(state, s => s.session.balance === v);
+  };
+  const playing = () => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active'));
+  await gameFrame.evaluate(() => { document.querySelector('.autoPlayButton').classList.remove('active'); document.querySelector('.betButton').className = 'betButton start'; document.querySelector('.betButton').textContent = 'bet'; });
+  await balance(1000);
+  await post('/api/session', {budget: 10000});
+
+  // The six values, checked as they are saved.
+  assert.match((await setup({betMode: 'percent', betValue: 50})).error, /more than 10%/);
+  assert.match((await setup({maxRounds: 2.5})).error, /whole number/);
+  const saved = await setup({lossLimit: 40, profitTarget: 500, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 2, lossAction: 'pause', pauseRounds: 1});
+  assert.equal(saved.ok, true, saved.error);
+
+  // On: the bet and target go into the game and its Auto Play starts.
+  const on = await pilot({on: true});
+  assert.equal(on.ok, true, on.error);
+  assert.equal(await playing(), true);
+  assert.deepEqual(await gameFrame.evaluate(() => [document.querySelector('.betSectionInput').value, document.querySelector('.autoPlayTagInput').value]), ['10', '2']);
+  assert.match((await setup({lossLimit: 50})).error, /Stop the autopilot/);
+
+  // Two losses in a row: it pauses (Auto Play off), then starts again one round later.
+  await balance(990);
+  await round(1.5);
+  await until(state, s => s.autopilot.day.net === -10);
+  await balance(980);
+  await round(1.2);
+  let st = await until(state, s => s.autopilot.phase === 'paused');
+  assert.equal(st.autopilot.day.net, -20);
+  await until(playing, v => v === false);
+  await round(3); // Sat out.
+  st = await until(state, s => s.autopilot.phase === 'running');
+  await until(playing, v => v === true);
+  assert.equal(st.autopilot.day.rounds, 2, 'the round it sat out is not counted');
+
+  // A win, then losses down to the limit: stopped for the day, Auto Play off, no restart.
+  await balance(970);
+  await balance(990);
+  await round(2.5);
+  await until(state, s => s.autopilot.day.net === -10);
+  await setTimeoutP(50);
+  await balance(980);
+  await round(1.1);
+  await until(state, s => s.autopilot.day.net === -20);
+  // A second loss in a row pauses again at −30; after the pause one more loss reaches the limit.
+  await balance(970);
+  await round(1.3);
+  st = await until(state, s => s.autopilot.phase === 'paused');
+  assert.equal(st.autopilot.day.net, -30);
+  await until(playing, v => v === false);
+  await round(4);
+  await until(state, s => s.autopilot.phase === 'running');
+  await until(playing, v => v === true);
+  await balance(960);
+  await round(1.05);
+  st = await until(state, s => !s.autopilot.on);
+  assert.equal(st.autopilot.day.net, -40);
+  assert.match(st.autopilot.day.stopped, /loss limit of ₹40/);
+  await until(playing, v => v === false);
+  assert.match((await pilot({on: true})).error, /done for today/);
+  assert.ok(st.autopilot.log.some(l => /Stopped for today/.test(l.text)));
+  await balance(1000);
 });
 
 test('presses nothing when the game button changes between the check and the press', async () => {

@@ -100,6 +100,31 @@
   .glogin .gmsg{flex:1 1 100%}.glogin .gmsg:empty{display:none}
   body.viewer .glogin{display:none}
   .recordonly{display:block;margin:8px auto 0;padding:4px 8px;background:none;border:0;color:var(--muted);font-size:13px;text-decoration:underline}
+  .views{display:flex;gap:6px;margin-bottom:12px}
+  .views button{flex:1;padding:11px;background:#252c3b;color:var(--text);border:1px solid var(--border);font-weight:700;font-size:15px}
+  .views button.on{background:var(--accent);color:#171126;border-color:var(--accent)}
+  details.more{margin-top:10px;text-align:left;font-size:13px;color:var(--muted)}
+  details.more > summary{cursor:pointer;padding:6px 0;color:var(--muted);text-decoration:underline}
+  .gamemore{margin-top:10px}
+  .gamepanel .press.main{margin-top:0}
+  .gamepanel .press.main button{flex:1;padding:10px 12px;font-size:14px;margin-top:0}
+  .pilot{text-align:left}
+  .plist{margin:0 0 12px;padding-left:18px;font-size:14px;color:var(--muted);line-height:1.6}
+  .plist b{color:var(--text)}
+  button.bet.halt{background:#ef4444;color:#fff}
+  button.bet:disabled{opacity:.45;cursor:not-allowed}
+  .pstatus{margin-top:10px;font-size:14px;text-align:center}
+  .pstatus.wait{color:var(--warn)}
+  .ptoday{margin:6px 0 10px;font-size:14px;text-align:center;color:var(--muted)}
+  .ptoday b{color:var(--text)}
+  .pilot .setmsg{text-align:center;font-size:13px;margin-bottom:8px}.pilot .setmsg:empty{display:none}
+  #pilotSettings{display:block;margin:0 auto;padding:8px 14px;font-size:13px}
+  .plog{padding:4px 0;border-top:1px solid var(--border)}
+  .plog span{color:var(--text);font-variant-numeric:tabular-nums;margin-right:6px}
+  dialog input[type="number"]{width:100%;margin-top:6px;padding:10px;font-size:15px;flex:1 1 80px;background:var(--bg)}
+  dialog .pair{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:14px;color:var(--muted)}
+  dialog .pair input,dialog .pair select{margin-top:0}
+  dialog .pair select{flex:1 1 120px}
   .gamepanel .setmsg{margin-top:8px;font-size:13px}
   .gamepanel .press{display:flex;flex-wrap:wrap;align-items:center;gap:0 2px;margin-top:6px}
   .gamepanel .press span{margin:8px 8px 0 0}
@@ -248,6 +273,33 @@
       </div>
     </form>
   </dialog>
+  <dialog id="pilotDlg" aria-labelledby="pilotTitle">
+    <form method="dialog" id="pilotForm">
+      <h2 id="pilotTitle">Autopilot settings</h2>
+      <label for="apLoss">1. Daily loss limit (₹)</label>
+      <input id="apLoss" type="number" min="1" step="1" required>
+      <p class="fine">The autopilot stops for the day before your losses can pass this.</p>
+      <label for="apProfit">2. Profit target (₹)</label>
+      <input id="apProfit" type="number" min="1" step="1" required>
+      <p class="fine">It stops for the day once it is up this much.</p>
+      <label for="apBetValue">3. Bet each round</label>
+      <div class="pair"><input id="apBetValue" type="number" min="0.1" step="0.1" required><select id="apBetMode" aria-label="Kind of bet"><option value="fixed">₹ fixed amount</option><option value="percent">% of the game balance</option></select></div>
+      <p class="fine">A share of the balance is worked out once, when the autopilot starts. The bet is never raised after a loss.</p>
+      <label for="apTarget">4. Cash out at (×)</label>
+      <input id="apTarget" type="number" min="1.01" step="0.01" required>
+      <label for="apRounds">5. Longest session in a day</label>
+      <div class="pair"><input id="apRounds" type="number" min="1" step="1" required aria-label="Rounds"><span>rounds, or</span><input id="apMinutes" type="number" min="1" step="1" required aria-label="Minutes"><span>minutes</span></div>
+      <label for="apStreak">6. After losses in a row</label>
+      <div class="pair"><span>After</span><input id="apStreak" type="number" min="1" step="1" required aria-label="Losses in a row"><span>losses:</span><select id="apAction" aria-label="What to do"><option value="pause">pause</option><option value="stop">stop for today</option></select></div>
+      <div class="pair" id="apPauseRow"><span>Pause for</span><input id="apPause" type="number" min="1" step="1" required aria-label="Rounds to pause"><span>rounds, then bet again</span></div>
+      <p class="fine">These limits decide when the autopilot stops. They cannot make a round more likely to win: every round is random, and the game keeps about 3% of all bets over time.</p>
+      <div class="warn" id="pilotError" hidden></div>
+      <div class="dialog-actions">
+        <button type="button" class="secondary-btn" id="cancelPilot">Cancel</button>
+        <button type="submit" id="savePilot">Save</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="diag" aria-labelledby="diagTitle">
     <h2 id="diagTitle">What the monitor sees in the game window</h2>
     <div id="diagBox">Checking…</div>
@@ -286,19 +338,30 @@
     <div class="meter" aria-hidden="true"><div id="riskBar"></div></div>
     <div class="lines" id="lines"></div>
     <div class="betbox">
-      <div class="betline" id="betLine"></div>
-      <div class="modes" id="modes" role="radiogroup" aria-label="How you cash out">
-        <button type="button" data-mode="auto" role="radio">Auto cash-out</button>
-        <button type="button" data-mode="manual" role="radio">Manual cash-out</button>
-        <button type="button" data-mode="autobet" role="radio">Game Auto Bet</button>
+      <div class="views" id="views" role="tablist" aria-label="Who places the bets">
+        <button type="button" data-view="hand" role="tab">Bet by hand</button>
+        <button type="button" data-view="pilot" role="tab">Autopilot</button>
       </div>
-      <p class="fine" id="modeHelp"></p>
-      <div class="gamepanel" id="gamePanel" hidden></div>
-      <div id="warnings"></div>
-      <button type="button" id="betBtn" class="bet" hidden></button>
-      <button type="button" id="recordOnly" class="recordonly" hidden>I already placed this bet in the game: only record it</button>
-      <div class="betmsg" id="betMsg"></div>
-      <p class="fine" id="betFine"></p>
+      <div id="viewHand">
+        <div class="betline" id="betLine"></div>
+        <div class="gamepanel" id="gamePanel" hidden></div>
+        <div id="warnings"></div>
+        <button type="button" id="betBtn" class="bet" hidden></button>
+        <div class="betmsg" id="betMsg"></div>
+        <div class="gamepanel gamemore" id="gameMore" hidden></div>
+        <details class="more" id="styleBox">
+          <summary>How I cash out, and recording a bet I placed myself</summary>
+          <div class="modes" id="modes" role="radiogroup" aria-label="How you cash out">
+            <button type="button" data-mode="auto" role="radio">Auto cash-out</button>
+            <button type="button" data-mode="manual" role="radio">Manual cash-out</button>
+            <button type="button" data-mode="autobet" role="radio">Game Auto Bet</button>
+          </div>
+          <p class="fine" id="modeHelp"></p>
+          <button type="button" id="recordOnly" class="recordonly" hidden>I already placed this bet in the game: only record it</button>
+        </details>
+        <p class="fine" id="betFine"></p>
+      </div>
+      <div id="viewPilot" hidden><div class="pilot" id="pilotBox"></div></div>
     </div>
     <div class="advice" id="advice"></div>
   </div>
@@ -561,7 +624,81 @@
     if ($('liveTargets').dataset.html !== html) { $('liveTargets').innerHTML = html; $('liveTargets').dataset.html = html; }
   }
 
+  // ---- Bet by hand / Autopilot ----
+  let view = 'hand', viewPicked = false, pilotLogOpen = false;
+  try { const v = localStorage.getItem('helperView'); if (v === 'pilot' || v === 'hand') { view = v; viewPicked = true; } } catch {}
+  function renderPilot() {
+    const p = state && state.autopilot;
+    if (p && p.on && !viewPicked) view = 'pilot';
+    for (const b of $('views').children) { const on = b.dataset.view === view; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); }
+    $('viewHand').hidden = view !== 'hand';
+    $('viewPilot').hidden = view !== 'pilot';
+    const box = $('pilotBox');
+    if (!p) { box.textContent = 'Connecting…'; return; }
+    const a = p.settings, live = state.capture.status === 'live';
+    const bet = a.betMode === 'percent' ? `${a.betValue}% of the game balance` : money(a.betValue);
+    const after = a.lossAction === 'stop' ? 'stop for today' : `pause ${a.pauseRounds} round${a.pauseRounds > 1 ? 's' : ''}`;
+    const status = p.on ? (p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : `Running: ${money(p.stake)} a round, cash out at ${a.target}×.`)
+      : p.day.stopped ? `Done for today: ${p.day.stopped}. It can start again tomorrow.`
+      : live ? 'Off. Nothing is bet until you start it.' : 'Off. Start live capture and open the game first.';
+    const html = `<ul class="plist">
+        <li>Each round: <b>${bet}</b>, cash out at <b>${a.target}×</b></li>
+        <li>Stops for today at: <b>${money(a.lossLimit)} lost</b>, <b>${money(a.profitTarget)} won</b>, <b>${a.maxRounds} rounds</b> or <b>${a.maxMinutes} minutes</b></li>
+        <li>After <b>${a.lossStreak}</b> losses in a row: <b>${after}</b></li>
+      </ul>
+      <button type="button" id="pilotGo" class="bet${p.on ? ' halt' : ''}"${!p.on && (p.day.stopped || !live) ? ' disabled' : ''}>${p.on ? 'Stop autopilot' : 'Start autopilot'}</button>
+      <div class="pstatus ${p.on ? (p.phase === 'paused' ? 'wait' : 'good') : p.day.stopped ? 'bad' : ''}">${status}</div>
+      <div class="ptoday">Autopilot today: <b class="${p.day.net > 0 ? 'good' : p.day.net < 0 ? 'bad' : ''}">${signed(p.day.net)}</b> · ${p.day.rounds} round${p.day.rounds === 1 ? '' : 's'} · ${p.day.minutes} min</div>
+      <div class="setmsg bad" id="pilotMsg">${pilotError}</div>
+      <button type="button" id="pilotSettings" class="secondary-btn"${p.on ? ' disabled title="Stop the autopilot to change its settings"' : ''}>Change autopilot settings</button>
+      <details class="more" id="pilotLog"${pilotLogOpen ? ' open' : ''}><summary>What it did (${p.log.length})</summary>${p.log.length ? p.log.map(l => `<div class="plog"><span>${clock(l.at)}</span> ${l.text}</div>`).join('') : '<div class="plog">Nothing yet.</div>'}</details>
+      <p class="fine">The autopilot starts the game's own Auto Play on Bet 1 with real money and stops it by these rules. It decides when to stop, not which rounds win: every round is random.</p>`;
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+  let pilotError = '';
+  $('views').addEventListener('click', e => {
+    const b = e.target.closest('button[data-view]');
+    if (!b) return;
+    view = b.dataset.view; viewPicked = true;
+    try { localStorage.setItem('helperView', view); } catch {}
+    renderPilot();
+  });
+  $('pilotBox').addEventListener('toggle', e => { if (e.target.id === 'pilotLog') pilotLogOpen = e.target.open; }, true);
+  $('pilotBox').addEventListener('click', async e => {
+    if (e.target.id === 'pilotGo') {
+      const on = !(state && state.autopilot && state.autopilot.on);
+      const a = state.autopilot.settings;
+      if (on && !confirm(`Start the autopilot? It will bet real money by itself: ${a.betMode === 'percent' ? `${a.betValue}% of the balance` : money(a.betValue)} a round, until ${money(a.lossLimit)} is lost, ${money(a.profitTarget)} is won, or ${a.maxRounds} rounds / ${a.maxMinutes} minutes are played.`)) return;
+      e.target.disabled = true;
+      unlockSound();
+      const r = await post('/api/autopilot', {on});
+      pilotError = r.ok ? '' : r.error;
+      renderPilot();
+    }
+    if (e.target.id === 'pilotSettings') {
+      const a = state.autopilot.settings;
+      $('apLoss').value = a.lossLimit; $('apProfit').value = a.profitTarget; $('apBetValue').value = a.betValue; $('apBetMode').value = a.betMode;
+      $('apTarget').value = a.target; $('apRounds').value = a.maxRounds; $('apMinutes').value = a.maxMinutes;
+      $('apStreak').value = a.lossStreak; $('apAction').value = a.lossAction; $('apPause').value = a.pauseRounds;
+      $('apPauseRow').hidden = a.lossAction === 'stop';
+      $('pilotError').hidden = true;
+      $('pilotDlg').showModal();
+    }
+  });
+  $('apAction').addEventListener('change', () => { $('apPauseRow').hidden = $('apAction').value === 'stop'; });
+  $('cancelPilot').addEventListener('click', () => $('pilotDlg').close());
+  $('pilotForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const n = id => Number($(id).value);
+    const r = await post('/api/autopilot/settings', {lossLimit: n('apLoss'), profitTarget: n('apProfit'), betMode: $('apBetMode').value, betValue: n('apBetValue'), target: n('apTarget'),
+      maxRounds: n('apRounds'), maxMinutes: n('apMinutes'), lossStreak: n('apStreak'), lossAction: $('apAction').value, pauseRounds: n('apPause') || 1});
+    if (!r.ok) { $('pilotError').textContent = r.error; $('pilotError').hidden = false; return; }
+    pilotError = '';
+    $('pilotDlg').close();
+  });
+
   function renderHelper() {
+    renderPilot();
     renderLiveTargets();
     for (const b of $('targets').querySelectorAll('button')) b.classList.toggle('on', Number(b.dataset.t) === target);
     if (![1.5, 2, 3, 5, 10].includes(target) && document.activeElement !== $('customTarget')) $('customTarget').value = target;
@@ -637,14 +774,24 @@
     if (g && (g.slots.length || ses.balance !== null)) {
       const yes = (v, on, off) => v === null ? '?' : v ? `<span class="on">${on}</span>` : `<span class="off">${off}</span>`;
       const slotsHtml = g.slots.map((x, i) => `<div>Bet ${i + 1}: <b>${x.bet === null ? '?' : money(x.bet)}</b> · Auto Cash Out ${yes(x.autoCashOut, `ON at ${x.target}×`, `OFF${x.target ? ` (${x.target}×)` : ''}`)} · Auto Play ${yes(x.autoPlay, 'ON', 'OFF')}</div>`).join('');
-      const html = `<div>In the game: balance <b>${ses.balance === null ? '?' : money(ses.balance)}</b></div>${slotsHtml}` +
-        (g.slots.length ? '<button type="button" id="useGame">Use the game\'s bet and target</button>' : '') +
-        g.slots.map((x, i) => `<button type="button" data-set="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Set Bet ${i + 1} in the game: ${money(stake)}, Auto Cash Out ${target}×</button>`).join('') +
-        g.slots.map((x, i) => `<div class="press"><span>Bet ${i + 1} in the game:</span><button type="button" class="go" data-press="bet" data-slot="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Place bet${x.bet ? ` ${money(x.bet)}` : ''}</button><button type="button" data-press="cancel" data-slot="${i}">Cancel bet</button><button type="button" class="out" data-press="cashout" data-slot="${i}">Cash out now</button>${x.autoPlay === null ? '' : `<button type="button" class="${x.autoPlay ? 'stop' : ''}" data-press="autoplay" data-on="${x.autoPlay ? 0 : 1}" data-slot="${i}">${x.autoPlay ? 'Stop Auto Play' : 'Start Auto Play'}</button>${x.autoPlay ? '' : `<select data-rounds aria-label="Rounds for Auto Play" title="How many rounds the game's Auto Play runs">${[10, 40, 100, 200].map(n => `<option value="${n}"${n === autoRounds ? ' selected' : ''}>${n} rounds</option>`).join('')}</select>`}`}</div>`).join('') +
-        (g.slots.length ? '<div class="setmsg" id="setMsg"></div><p class="fine">The Set buttons fill in the amount and the Auto Cash Out target. Place bet, Cancel bet and Cash out now press the game\'s own button for that bet, with real money, the moment you click. Start Auto Play makes the game bet by itself for the number of rounds you pick next to it; Stop Auto Play ends that.</p>' : '');
-      if (gp.dataset.html !== html) { gp.innerHTML = html; gp.dataset.html = html; showSetNote(); }
+      const html = `<div>In the game: balance <b>${ses.balance === null ? '?' : money(ses.balance)}</b></div>${slotsHtml}`;
+      if (gp.dataset.html !== html) { gp.innerHTML = html; gp.dataset.html = html; }
       gp.hidden = false;
-    } else gp.hidden = true;
+      const playBtn = (x, i) => x.autoPlay === null ? '' : `<button type="button" class="${x.autoPlay ? 'stop' : ''}" data-press="autoplay" data-on="${x.autoPlay ? 0 : 1}" data-slot="${i}">${x.autoPlay ? 'Stop Auto Play' : 'Start Auto Play'}</button>${x.autoPlay ? '' : `<select data-rounds aria-label="Rounds for Auto Play" title="How many rounds the game's Auto Play runs">${[10, 40, 100, 200].map(n => `<option value="${n}"${n === autoRounds ? ' selected' : ''}>${n} rounds</option>`).join('')}</select>`}`;
+      const placeBtn = (x, i) => `<button type="button" class="go" data-press="bet" data-slot="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Place bet${x.bet ? ` ${money(x.bet)}` : ''} as the game shows it</button>`;
+      const moreHtml = !g.slots.length ? '' :
+        `<div class="press main"><button type="button" data-press="cancel" data-slot="0">Cancel bet</button><button type="button" class="out" data-press="cashout" data-slot="0">Cash out now</button>${g.slots[0].autoPlay ? playBtn(g.slots[0], 0) : ''}</div>` +
+        '<div class="setmsg" id="setMsg"></div>' +
+        `<details class="more" id="moreBox"${moreOpen ? ' open' : ''}><summary>More controls</summary>` +
+        '<p class="fine">For Bet 1</p>' +
+        `<div class="press"><button type="button" data-set="0"${g.slots[0].autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Only set ${money(stake)} and ${target}× in the game</button>${placeBtn(g.slots[0], 0)}${g.slots[0].autoPlay ? '' : playBtn(g.slots[0], 0)}</div>` +
+        g.slots.slice(1).map((x, k) => { const i = k + 1; return `<p class="fine">For Bet ${i + 1}</p><div class="press"><button type="button" data-set="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Only set ${money(stake)} and ${target}× in the game</button>${placeBtn(x, i)}<button type="button" data-press="cancel" data-slot="${i}">Cancel bet</button><button type="button" class="out" data-press="cashout" data-slot="${i}">Cash out now</button>${playBtn(x, i)}</div>`; }).join('') +
+        '<div class="press"><button type="button" id="useGame">Copy the game\'s bet and target into this page</button></div>' +
+        '<p class="fine">Every button here presses the game\'s own button with real money, the moment you click. Start Auto Play makes the game bet by itself for the rounds you pick.</p></details>';
+      const gm = $('gameMore');
+      if (gm.dataset.html !== moreHtml) { gm.innerHTML = moreHtml; gm.dataset.html = moreHtml; showSetNote(); }
+      gm.hidden = !moreHtml;
+    } else { gp.hidden = true; $('gameMore').hidden = true; }
     const wHtml = ses.warnings.map(w => `<div class="gw">⚠ ${w}</div>`).join('');
     if ($('warnings').dataset.html !== wHtml) { $('warnings').innerHTML = wHtml; $('warnings').dataset.html = wHtml; }
     const last = ses.recent[0];
@@ -691,7 +838,7 @@
     btn.dataset.wired = wired ? '1' : '';
     $('recordOnly').hidden = btn.hidden || !wired;
     $('betFine').textContent = wired
-      ? 'The green button sets the amount in the game, presses the game\'s Bet button for Bet 1 with real money, and records the bet here. Press it while the game is taking bets: pressed during a flight, the game keeps the bet for the next round and this record can be one round off. The monitor also cancels waiting bets and switches Auto Play off when your stop-loss is reached.'
+      ? 'The green button places a real-money bet on Bet 1 in the game and records it here. Press it while the game is taking bets; pressed during a flight, the game keeps the bet for the next round and this record can be one round off.'
       : 'The game\'s bet panel is not on screen, so this button only records a bet you placed in the game yourself.';
     btn.textContent = wired ? (mode === 'auto' ? `Place ${money(stake)} bet in the game, auto cash-out at ${target}×` : `Place ${money(stake)} bet in the game – I'll cash out myself`)
       : mode === 'auto' ? `I placed ${money(stake)} with auto cash-out at ${target}×`
@@ -885,19 +1032,21 @@
     $('gGo').disabled = false;
     say(r.ok, r.ok ? 'Logged in to the game. Now open Aviator in the game window. The password was not saved.' : r.error || 'The login did not work.');
   });
-  $('gamePanel').addEventListener('change', e => {
+  let moreOpen = false;
+  $('gameMore').addEventListener('toggle', e => { if (e.target.id === 'moreBox') moreOpen = e.target.open; }, true);
+  $('gameMore').addEventListener('change', e => {
     if (!e.target.matches('select[data-rounds]')) return;
     autoRounds = Number(e.target.value) || 10;
     try { localStorage.setItem('autoRounds', autoRounds); } catch {}
     for (const el of document.querySelectorAll('select[data-rounds]')) el.value = autoRounds;
   });
-  $('gamePanel').addEventListener('click', async e => {
+  $('gameMore').addEventListener('click', async e => {
     const setBtn = e.target.closest('button[data-set]');
     if (setBtn) {
       const slot = Number(setBtn.dataset.set), bet = Number($('stakeInput').value);
       setNote = {ok: true, text: 'Setting it in the game…'}; showSetNote();
       const r = await post('/api/game/set', {slot, bet, target});
-      setNote = r.ok ? {ok: true, text: `Done at ${clock(Date.now())}: Bet ${slot + 1} in the game is ${money(r.shown.bet)} with Auto Cash Out at ${r.shown.target}×. Press Place bet below, or Auto Play in the game, when you are ready.`}
+      setNote = r.ok ? {ok: true, text: `Done at ${clock(Date.now())}: Bet ${slot + 1} in the game is ${money(r.shown.bet)} with Auto Cash Out at ${r.shown.target}×. Nothing is bet until you press a bet button.`}
         : {ok: false, text: r.error};
       showSetNote();
       return;

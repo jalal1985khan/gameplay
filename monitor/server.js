@@ -63,6 +63,10 @@ function createMonitor({
   const settingsFile = path.join(dataDir, 'settings.json');
   let settings = {...DEFAULT_SETTINGS};
   try { settings = {...settings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8'))}; } catch {}
+  // The autopilot's limits (set by the person on its settings screen) and its totals for the day.
+  const pilotFile = path.join(dataDir, 'autopilot.json');
+  const pilotCfg = {settings: {lossLimit: 250, profitTarget: 200, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 3, lossAction: 'pause', pauseRounds: 5}, day: null};
+  try { const saved = JSON.parse(fs.readFileSync(pilotFile, 'utf8')); pilotCfg.settings = {...pilotCfg.settings, ...(saved.settings || {})}; pilotCfg.day = saved.day || null; } catch {}
   function saveSettings(input = {}) {
     const pause = Number(input.pauseRounds), share = Number(input.stopLossShare);
     if (input.pauseRounds !== undefined && !(Number.isInteger(pause) && pause >= 0 && pause <= 10)) return {ok: false, error: 'The pause after a loss must be 0 to 10 rounds.'};
@@ -446,6 +450,7 @@ function createMonitor({
       // Newest 200 rounds, newest first, with a flag where rounds were missed before them.
       recent: values.slice(start).map((v, i) => ({v, at: times[start + i], gap: gaps.includes(start + i)})).reverse(),
       session: sessionState(),
+      autopilot: pilotState(),
       settings,
     };
   }
@@ -472,6 +477,7 @@ function createMonitor({
     })) : [];
     panel = {balance: num(p.balance), slots, at: Date.now()};
     if (panel.balance !== null) fundsSeen = Math.max(fundsSeen ?? 0, panel.balance);
+    if (panel.balance !== null && pilot.watchLow !== null) pilot.watchLow = Math.min(pilot.watchLow, panel.balance);
     if (panel.balance !== null) roundLow = roundLow === null ? panel.balance : Math.min(roundLow, panel.balance);
     if (followGame()) saveSession();
     // The day's starting balance: the first one seen after the day began.
@@ -485,6 +491,7 @@ function createMonitor({
   function onPanel(p) {
     applyPanel(p);
     void maybeAutoCutOff();
+    void pilotTick();
   }
 
   function onSnapshot(snap, frameUrl = '') {
@@ -522,6 +529,7 @@ function createMonitor({
     }
     setCapture(patch);
     void maybeAutoCutOff();
+    void pilotTick();
   }
 
   async function openBrowser() {
@@ -1044,6 +1052,174 @@ function createMonitor({
     return autoCutOff();
   }
 
+  // ---- Autopilot ----
+  // Runs the game's own Auto Play inside limits the person set: it sets the bet and the Auto
+  // Cash Out target, starts Auto Play, counts every result, and stops for the day at the loss
+  // limit, the profit target, the round limit or the time limit. It decides when to stop, never
+  // what the next round will do: rounds are random, so there is nothing to predict.
+  const ROUND_CHOICES = [10, 40, 100, 200]; // What the game's Auto Play options offer.
+  const dayOf = t => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const round2 = n => Math.round(n * 100) / 100;
+  let pilot = {on: false, phase: 'off', startedAt: 0, stake: 0, streak: 0, pauseUntil: 0, lastTick: 0, engagedAt: 0, engageBalance: null, watchLow: null, firstCheck: false, fails: 0, needCut: false, note: '', log: []};
+  let pilotTicking = false;
+  const savePilot = () => { try { atomicWrite(pilotFile, JSON.stringify(pilotCfg)); } catch {} };
+  function pilotDay() {
+    const day = dayOf(Date.now());
+    if (!pilotCfg.day || pilotCfg.day.day !== day) pilotCfg.day = {day, net: 0, rounds: 0, ms: 0, stopped: ''};
+    return pilotCfg.day;
+  }
+  function pilotSay(text) {
+    pilot.note = text;
+    pilot.log.unshift({at: Date.now(), text});
+    pilot.log.length = Math.min(pilot.log.length, 40);
+  }
+  function pilotState() {
+    const day = pilotDay();
+    return {on: pilot.on, phase: pilot.phase, stake: pilot.stake, note: pilot.note, log: pilot.log,
+      pauseLeft: pilot.phase === 'paused' ? Math.max(0, pilot.pauseUntil - seen) : 0,
+      day: {net: day.net, rounds: day.rounds, minutes: Math.floor(day.ms / 60000), stopped: day.stopped},
+      settings: pilotCfg.settings};
+  }
+  function saveAutopilot(input = {}) {
+    const a = {...pilotCfg.settings};
+    const num = (key, min, max, whole, label) => {
+      if (input[key] === undefined) return '';
+      const v = Number(input[key]);
+      if (!Number.isFinite(v) || v < min || v > max || (whole && !Number.isInteger(v))) return `${label} must be ${whole ? 'a whole number ' : ''}from ${min} to ${max}.`;
+      a[key] = v;
+      return '';
+    };
+    if (input.betMode !== undefined) { if (!['fixed', 'percent'].includes(input.betMode)) return {ok: false, error: 'Choose a fixed bet or a share of the balance.'}; a.betMode = input.betMode; }
+    if (input.lossAction !== undefined) { if (!['pause', 'stop'].includes(input.lossAction)) return {ok: false, error: 'Choose pause or stop after losses in a row.'}; a.lossAction = input.lossAction; }
+    const error = num('lossLimit', 1, 10000000, false, 'The daily loss limit') || num('profitTarget', 1, 10000000, false, 'The profit target')
+      || num('betValue', 0.1, 1000000, false, 'The bet') || num('target', 1.01, 1000, false, 'The cash-out target')
+      || num('maxRounds', 1, 5000, true, 'The round limit') || num('maxMinutes', 1, 1440, true, 'The time limit')
+      || num('lossStreak', 1, 50, true, 'Losses in a row') || num('pauseRounds', 1, 100, true, 'The pause');
+    if (error) return {ok: false, error};
+    if (a.betMode === 'percent' && a.betValue > 10) return {ok: false, error: 'A bet of more than 10% of the balance is not allowed.'};
+    if (pilot.on) return {ok: false, error: 'Stop the autopilot before changing its settings.'};
+    a.target = round2(a.target);
+    pilotCfg.settings = a;
+    savePilot();
+    broadcast();
+    return {ok: true, settings: a};
+  }
+  // Sets the bet and target in the game and starts the game's Auto Play for bet 1.
+  async function pilotEngage() {
+    const a = pilotCfg.settings, left = Math.max(1, a.maxRounds - pilotDay().rounds);
+    let r = await setGame({slot: 0, bet: pilot.stake, target: a.target});
+    if (!r.ok) return r;
+    pilot.engageBalance = panel ? panel.balance : null;
+    pilot.watchLow = pilot.engageBalance;
+    pilot.firstCheck = true;
+    r = await clickGame({slot: 0, action: 'autoplay', on: true, rounds: ROUND_CHOICES.find(n => n >= left) || ROUND_CHOICES.at(-1)});
+    pilot.engagedAt = Date.now();
+    return r;
+  }
+  async function pilotStop(reason, forToday) {
+    pilot.on = false;
+    pilot.phase = 'off';
+    if (forToday) pilotDay().stopped = reason;
+    pilotSay(forToday ? `Stopped for today: ${reason}.` : `Autopilot off: ${reason}.`);
+    savePilot();
+    pilot.needCut = true;
+    const r = context && capture.status === 'live' ? await autoCutOff({force: true}).catch(() => null) : {ok: true};
+    if (r && r.ok) pilot.needCut = false;
+    broadcast();
+  }
+  async function pilotSwitch({on} = {}) {
+    const fail = error => ({ok: false, error});
+    if (typeof on !== 'boolean') return fail('Set "on" to true or false.');
+    if (!on) {
+      if (pilot.on) await pilotStop('you switched it off', false);
+      return {ok: true, autopilot: pilotState()};
+    }
+    if (pilot.on) return {ok: true, autopilot: pilotState()};
+    const a = pilotCfg.settings, day = pilotDay();
+    if (day.stopped) return fail(`The autopilot is done for today (${day.stopped}). It can start again tomorrow.`);
+    if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
+    const slot = panel && panel.slots[0], balance = panel ? panel.balance : null;
+    if (!slot || balance === null) return fail("The game's bet panel or balance is not on screen yet.");
+    if (panel.slots.some(x => x.autoPlay === true)) return fail('Auto Play is already on in the game. Stop it first.');
+    if (sessionState().stopped) return fail('Stop-loss reached. You are done for today.');
+    const stake = a.betMode === 'percent' ? Math.max(1, Math.floor(balance * a.betValue / 100)) : round2(a.betValue);
+    if (stake > balance) return fail(`The bet (₹${stake}) is more than the game balance (₹${balance}).`);
+    if (day.net - stake < -a.lossLimit) return fail(`One more bet of ₹${stake} could pass today's loss limit of ₹${a.lossLimit}.`);
+    if (day.rounds >= a.maxRounds) return fail(`Today's limit of ${a.maxRounds} rounds is used up.`);
+    pilot = {...pilot, on: true, phase: 'running', startedAt: Date.now(), stake, streak: 0, lastTick: Date.now(), fails: 0, needCut: false};
+    pilotSay(`Autopilot on: ₹${stake} a round, cash out at ${a.target}×.`);
+    const r = await pilotEngage();
+    if (!r.ok) { await pilotStop(`it could not start the game's Auto Play (${r.error})`, false); return fail(r.error); }
+    broadcast();
+    return {ok: true, autopilot: pilotState()};
+  }
+  async function pilotTick() {
+    if (pilotTicking) return;
+    pilotTicking = true;
+    let changed = false;
+    try {
+      const live = !!context && capture.status === 'live';
+      if (pilot.needCut && live && !busy) {
+        const still = panel && panel.slots.some(x => x.autoPlay === true || (x.button && /cancel/i.test(x.button)));
+        const r = still ? await autoCutOff({force: true}).catch(() => null) : {ok: true};
+        if (r && r.ok) pilot.needCut = false;
+      }
+      if (!pilot.on) return;
+      if (!live) { pilot.on = false; pilot.phase = 'off'; pilotSay('Autopilot off: live capture stopped.'); changed = true; return; }
+      const a = pilotCfg.settings, day = pilotDay(), now = Date.now();
+      if (pilot.phase === 'running') day.ms += now - pilot.lastTick;
+      pilot.lastTick = now;
+      // Count the results that came in since the last look.
+      for (const b of [...session.bets]) {
+        if (!b.follow || b.piloted || b.at < pilot.startedAt || !(b.result === 'won' || b.result === 'lost')) continue;
+        if (pilot.firstCheck) {
+          // Started mid-flight: the balance never dropped by the bet, so no bet rode on this round.
+          pilot.firstCheck = false;
+          if (pilot.engageBalance !== null && pilot.watchLow !== null && pilot.watchLow > pilot.engageBalance - pilot.stake + 0.005) {
+            session.bets.splice(session.bets.indexOf(b), 1);
+            saveSession();
+            changed = true;
+            continue;
+          }
+        }
+        b.piloted = true;
+        day.net = round2(day.net + b.profit);
+        day.rounds++;
+        pilot.streak = b.result === 'lost' ? pilot.streak + 1 : 0;
+        changed = true;
+      }
+      let stop = '';
+      if (day.net <= -a.lossLimit) stop = `the loss limit of ₹${a.lossLimit} was reached`;
+      else if (day.net - pilot.stake < -a.lossLimit) stop = `one more bet could pass the loss limit of ₹${a.lossLimit}`;
+      else if (day.net >= a.profitTarget) stop = `the profit target of ₹${a.profitTarget} was reached`;
+      else if (day.rounds >= a.maxRounds) stop = `${a.maxRounds} rounds were played`;
+      else if (day.ms >= a.maxMinutes * 60000) stop = `${a.maxMinutes} minutes were played`;
+      else if (sessionState().stopped) stop = "the day's stop-loss was reached";
+      else if (pilot.streak >= a.lossStreak && a.lossAction === 'stop') stop = `${pilot.streak} losses in a row`;
+      if (stop) { await pilotStop(stop, true); return; }
+      const playing = !!(panel && panel.slots[0] && panel.slots[0].autoPlay === true);
+      if (pilot.phase === 'running' && pilot.streak >= a.lossStreak) {
+        pilot.phase = 'paused';
+        pilot.pauseUntil = seen + a.pauseRounds;
+        pilotSay(`${pilot.streak} losses in a row: pausing for ${a.pauseRounds} round${a.pauseRounds > 1 ? 's' : ''}.`);
+        pilot.streak = 0;
+        pilot.needCut = true;
+        changed = true;
+      } else if (!busy && !pilot.needCut && ((pilot.phase === 'paused' && seen >= pilot.pauseUntil) || (pilot.phase === 'running' && !playing && now - pilot.engagedAt > 4000))) {
+        // The pause is over, or the game's Auto Play ran through its rounds: start it again.
+        const resumed = pilot.phase === 'paused';
+        const r = await pilotEngage();
+        if (r.ok) { pilot.phase = 'running'; pilot.fails = 0; pilot.lastTick = Date.now(); if (resumed) pilotSay('Pause over: betting again.'); }
+        else if (++pilot.fails >= 3) { await pilotStop(`the game's Auto Play could not be started (${r.error})`, false); return; }
+        changed = true;
+      }
+    } finally {
+      pilotTicking = false;
+      if (changed) { savePilot(); broadcast(); }
+    }
+  }
+  const pilotTimer = setInterval(() => { void pilotTick(); }, 2000);
+
   async function maybeAutoCutOff() {
     if (!context || capture.status !== 'live') return;
     const st = sessionState();
@@ -1166,6 +1342,8 @@ function createMonitor({
       if (pathname === '/api/game/set') return send(await setGame(await readJson(req)));
       if (pathname === '/api/game/login') return send(await loginGame(await readJson(req)));
       if (pathname === '/api/game/click') return send(await clickGame(await readJson(req)));
+      if (pathname === '/api/autopilot') return send(await pilotSwitch(await readJson(req)));
+      if (pathname === '/api/autopilot/settings') return send(saveAutopilot(await readJson(req)));
       if (pathname === '/api/game/cutoff') return send(await handleCutOff(await readJson(req)));
       if (pathname === '/api/settings') return send(saveSettings(await readJson(req)));
       if (pathname === '/api/autobet') { const b = await readJson(req); return send(b.on ? startAutoBet(b) : stopAutoBet()); }
@@ -1240,6 +1418,7 @@ function createMonitor({
       clearInterval(ping);
       clearInterval(grabTimer);
       clearInterval(staleTimer);
+      clearInterval(pilotTimer);
       // Close the game window first (it sends a last update), then the open pages.
       await stop('');
       for (const res of viewers) res.end();

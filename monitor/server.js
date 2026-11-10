@@ -1,7 +1,8 @@
 // Aviator Live Monitor: a small local server with one page. You enter the game URL and click
 // Start live capture; it opens the game in a real browser window where you log in as usual,
 // reads each finished round from the game's results list, and streams it to the monitor page.
-// Runs only on this computer (127.0.0.1). It never reads or stores logins, and never places bets.
+// Runs only on this computer (127.0.0.1). It never reads or stores logins, and never places bets:
+// on request it fills in the bet amount and Auto Cash Out target, and the person presses Bet.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -584,13 +585,87 @@ function createMonitor({
             const own = [...el.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join(' ').slice(0, 40);
             let depth = 0; for (let p = el; p.parentElement; p = p.parentElement) depth++;
             rows.push({d: depth, tag: el.tagName.toLowerCase(), cls: cls.slice(0, 90), text: own, value: el.value !== undefined && el.tagName === 'INPUT' ? String(el.value).slice(0, 20) : undefined,
-              type: el.type, checked: el.type === 'checkbox' ? el.checked : undefined, disabled: el.disabled || undefined});
+              type: el.type, checked: el.type === 'checkbox' ? el.checked : undefined, disabled: el.disabled || undefined,
+              box: (r => `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.left)},${Math.round(r.top)}`)(el.getBoundingClientRect())});
           }
           return rows;
         })});
       } catch (e) { out.push({url: frame.url().slice(0, 120), error: String(e.message).split('\n')[0]}); }
     }
     return {ok: true, frames: out};
+  }
+
+  // Fills in the bet amount and the Auto Cash Out target of one bet slot in the game, when the
+  // person asks for it on the monitor page, then reads both back from the game. It prepares a
+  // bet; it never presses Bet or Cash Out and never switches Auto Play: those stay with the person.
+  let setting = false;
+  async function setGame({slot = 0, bet, target} = {}) {
+    const fail = error => ({ok: false, error});
+    slot = Number(slot);
+    const wantBet = bet !== undefined && bet !== null && bet !== '', wantTarget = target !== undefined && target !== null && target !== '';
+    bet = Math.round(Number(bet) * 100) / 100;
+    target = Math.round(Number(target) * 100) / 100;
+    if (!wantBet && !wantTarget) return fail('Enter a bet or a cash-out target to set.');
+    if (wantBet && !(bet > 0)) return fail('Enter a bet above ₹0.');
+    if (wantTarget && !(target > 1 && target <= 1000)) return fail('Enter a cash-out target above 1×.');
+    if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
+    const now = panel && panel.slots[slot];
+    if (!Number.isInteger(slot) || !now) return fail("The game's bet panel is not on screen.");
+    const st = sessionState();
+    if (st.stopped) return fail('Stop-loss reached. You are done for today.');
+    if (now.autoPlay === true) return fail('Auto Play is on for this bet in the game. Switch it off there before changing the bet.');
+    if (now.button && !/start/i.test(now.button)) return fail('A bet is already placed or in flight on this slot. Wait for the round to finish.');
+    if (wantBet && bet > st.left) return fail(`That is more than the ₹${Math.round(st.left)} you have left today.`);
+    if (setting) return fail('Still setting the last values. Try again in a moment.');
+    setting = true;
+    try {
+      let frame = null;
+      for (const page of context.pages()) for (const f of page.frames()) {
+        let host = '';
+        try { host = new URL(f.url()).host; } catch {}
+        if (host === capture.source && await f.locator('.betSectionBlock').count().catch(() => 0) > slot) frame = f;
+      }
+      if (!frame) return fail("The game's bet panel is not on screen.");
+      const block = frame.locator('.betSectionBlock').nth(slot);
+      const type = async (box, value) => { await box.fill(String(value), {timeout: 3000}); await box.blur({timeout: 3000}); };
+      if (wantBet) await type(block.locator('.betSectionInput'), bet);
+      if (wantTarget) {
+        const box = block.locator('.autoPlayTagInput');
+        // The target box is greyed out while Auto Cash Out is off: switch it on first.
+        let why = '';
+        if (await box.isDisabled({timeout: 3000})) {
+          // The switch itself, or its "auto cash out" label: both sit inside the Auto Cash Out
+          // part of this bet slot (Auto Play is a separate button and is never touched).
+          for (const part of ['.autoCashOut .switcher', '.autoCashOut .autoPlaySwitcherText', '.autoCashOut [class*=switch]']) {
+            if (!await box.isDisabled()) break;
+            const sw = block.locator(part).first();
+            // When the switch is below the visible edge of the game window a pointer click can't
+            // reach it, so the click is sent to the element itself.
+            await sw.click({timeout: 1500}).catch(async e => {
+              why = String(e.message).split('\n')[0];
+              if (/Timeout/.test(why)) await sw.dispatchEvent('click', {}, {timeout: 1500}).catch(() => {});
+            });
+            for (let i = 0; i < 10 && await box.isDisabled(); i++) await new Promise(r => setTimeout(r, 100));
+          }
+          if (await box.isDisabled()) return {detail: why || 'the clicks were accepted but the switch did not change', ...fail(`${wantBet ? `The bet is set to ₹${bet}, but ` : ''}Auto Cash Out could not be switched on from here. Switch it on in the game, then set the target again.`)};
+        }
+        await type(box, target);
+      }
+      // The game may round or limit what was typed: what it shows afterwards is what counts.
+      await new Promise(r => setTimeout(r, 400));
+      const shown = await block.evaluate(b => {
+        const num = el => { const n = el ? Number(String(el.value).replace(/[^0-9.]/g, '')) : NaN; return Number.isFinite(n) && el && /\d/.test(el.value) ? n : null; };
+        const tag = b.querySelector('.autoPlayTagInput');
+        return {bet: num(b.querySelector('.betSectionInput')), target: num(tag), autoCashOut: tag ? !tag.disabled : null};
+      });
+      const wrong = [];
+      if (wantBet && shown.bet !== bet) wrong.push(`the game shows a bet of ${shown.bet === null ? 'nothing' : `₹${shown.bet}`}, not ₹${bet}`);
+      if (wantTarget && (shown.target !== target || shown.autoCashOut === false)) wrong.push(`the game shows Auto Cash Out ${shown.autoCashOut === false ? 'OFF' : `at ${shown.target}×`}, not at ${target}×`);
+      if (wrong.length) return {ok: false, shown, error: `Not set as asked: ${wrong.join('; ')}. Check the game window (it may have its own limits).`};
+      return {ok: true, slot, shown};
+    } catch (e) {
+      return fail(`The game's bet boxes could not be filled in (${String(e.message).split('\n')[0]}).`);
+    } finally { setting = false; }
   }
 
   function clear() {
@@ -639,6 +714,7 @@ function createMonitor({
       if (pathname === '/api/clear') return send(clear());
       if (pathname === '/api/bet') return send(placeBet(await readJson(req)));
       if (pathname === '/api/bet/undo') return send(undoBet());
+      if (pathname === '/api/game/set') return send(await setGame(await readJson(req)));
       if (pathname === '/api/settings') return send(saveSettings(await readJson(req)));
       if (pathname === '/api/autobet') { const b = await readJson(req); return send(b.on ? startAutoBet(b) : stopAutoBet()); }
       if (pathname === '/api/bet/cashout') return send(cashOut(await readJson(req)));

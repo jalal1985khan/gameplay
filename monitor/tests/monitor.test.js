@@ -20,13 +20,16 @@ async function until(fn, ok, ms = 15000) {
 const PANEL = `<div class="userBalance"><span class="userBalanceText">balance :</span> <span class="userBalanceMoney">₹1,000.00</span></div>
   <div class="betSectionBlock"><input class="betSectionInput" value="2"><button class="betButton start"><span class="betTitle">bet</span></button>
   <div class="autoPlayContainer"><button class="autoPlayButton auto"><span class="autoPlayButtonLabel">auto play</span></button>
-  <div class="autoCashOut"><div class="forAvi switcher"></div><input class="autoPlayTagInput" value="2" disabled></div></div></div>`;
+  <div class="autoCashOut"><div class="forAvi switcher" style="width:30px;height:16px"></div><input class="autoPlayTagInput" value="2" disabled></div></div></div>`;
 const GAME = `<!doctype html><body>${PANEL}<div id="flying">1.37x</div><div id="list"></div><script>
   const list = document.getElementById('list');
   const add = v => { const d = document.createElement('div'); d.textContent = v.toFixed(2) + 'x'; list.prepend(d); while (list.children.length > 20) list.lastChild.remove(); };
   [1.20, 3.45, 1.00, 12.30, 2.05, 1.71].forEach(add);
   let i = 0; const next = [4.44, 1.08, 2.50, 1.99, 7.77];
   setInterval(() => { if (i < next.length) add(next[i++]); }, 400);
+  // Like the game: the Auto Cash Out switch frees its target box, and bets are limited to 20,000.
+  document.querySelector('.switcher').addEventListener('click', () => { const t = document.querySelector('.autoPlayTagInput'); t.disabled = !t.disabled; });
+  document.querySelector('.betSectionInput').addEventListener('blur', e => { if (Number(e.target.value) > 20000) e.target.value = '20000'; });
 </script></body>`;
 
 const ODDS_PAGE = port => `<!doctype html><body><div id="odds"></div><script>
@@ -374,6 +377,43 @@ test("follows the game's Auto Play: starts, uses the game's bet and target, skip
   ses = (await round(4)).session;
   assert.equal(ses.all.length, n);
   await balance(1000);
+});
+
+test("sets the bet and Auto Cash Out target in the game on request, and checks what the game shows", async () => {
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  const set = body => post('/api/game/set', body).then(r => r.json());
+  const boxes = () => gameFrame.evaluate(() => [document.querySelector('.betSectionInput').value, document.querySelector('.autoPlayTagInput').value, document.querySelector('.autoPlayTagInput').disabled]);
+  await post('/api/session', {budget: 1000});
+  // Auto Cash Out is off in the game: it is switched on so the target can be set.
+  await gameFrame.evaluate(() => { document.querySelector('.autoPlayTagInput').disabled = true; });
+  const r = await set({slot: 0, bet: 10, target: 1.8});
+  assert.deepEqual(r, {ok: true, slot: 0, shown: {bet: 10, target: 1.8, autoCashOut: true}});
+  assert.deepEqual(await boxes(), ['10', '1.8', false]);
+  const slot = (await until(state, x => x.session.game.slots[0].bet === 10)).session.game.slots[0];
+  assert.deepEqual([slot.bet, slot.target, slot.autoCashOut, slot.autoPlay], [10, 1.8, true, false], 'the bet is prepared, not placed');
+  // Only one of the two.
+  assert.equal((await set({slot: 0, target: 2.5})).shown.target, 2.5);
+  assert.deepEqual(await boxes(), ['10', '2.5', false]);
+  // Refused: nothing to set, no such slot, more than today's money.
+  assert.match((await set({slot: 0})).error, /Enter a bet/);
+  assert.match((await set({slot: 3, bet: 5})).error, /not on screen/);
+  assert.match((await set({slot: 0, bet: 5000})).error, /more than the ₹1000/);
+  assert.deepEqual(await boxes(), ['10', '2.5', false]);
+  // The game limits the amount: the monitor reports what the game shows instead of assuming.
+  await post('/api/session', {budget: 100000});
+  const limited = await set({slot: 0, bet: 50000});
+  assert.equal(limited.ok, false);
+  assert.match(limited.error, /game shows a bet of ₹20000, not ₹50000/);
+  await post('/api/session', {budget: 1000});
+  // Never while the game is betting by itself.
+  await gameFrame.evaluate(() => { document.querySelector('.autoPlayButton').classList.add('active'); });
+  await until(state, x => x.session.follow);
+  assert.match((await set({slot: 0, bet: 3})).error, /Auto Play is on/);
+  await gameFrame.evaluate(() => { document.querySelector('.autoPlayButton').classList.remove('active'); });
+  await until(state, x => !x.session.autoBet);
+  // Other websites cannot use it.
+  assert.equal((await post('/api/game/set', {slot: 0, bet: 3}, {Origin: 'https://evil.example'})).status, 403);
+  assert.equal((await boxes())[0], '20000');
 });
 
 test('stop closes the game window; history is kept and saved', async () => {

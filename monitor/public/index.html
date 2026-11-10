@@ -86,7 +86,9 @@
   .gamepanel{margin:0 0 10px;padding:10px 12px;border-radius:9px;background:#1b2130;border:1px solid var(--border);font-size:13px;color:var(--muted);text-align:left}
   .gamepanel b{color:var(--text)}
   .gamepanel .off{color:var(--low)}.gamepanel .on{color:var(--ok)}
-  .gamepanel button{margin-top:8px;padding:7px 12px;font-size:13px;background:#252c3b;color:var(--text);border:1px solid var(--border)}
+  .gamepanel .setmsg{margin-top:8px;font-size:13px}
+  .gamepanel .setmsg:empty{display:none}
+  .gamepanel button{margin-right:6px;margin-top:8px;padding:7px 12px;font-size:13px;background:#252c3b;color:var(--text);border:1px solid var(--border)}
   #warnings .gw{margin:0 0 10px;padding:9px 11px;border-radius:9px;background:#3a2f17;color:var(--warn);font-size:13px;text-align:left}
   .modes{display:flex;gap:6px;margin-bottom:4px}
   .modes button{flex:1;padding:9px;background:#252c3b;color:var(--text);border:1px solid var(--border);font-weight:600;font-size:14px}
@@ -284,7 +286,7 @@
       <div id="warnings"></div>
       <button type="button" id="betBtn" class="bet" hidden></button>
       <div class="betmsg" id="betMsg"></div>
-      <p class="fine">The monitor never places bets or cashes out. Place your bet in the game window, then press the button before the plane takes off.</p>
+      <p class="fine">The monitor never places bets or cashes out. It can fill in the amount and target for you; you press Bet in the game window.</p>
     </div>
     <div class="advice" id="advice"></div>
   </div>
@@ -604,8 +606,10 @@
       const yes = (v, on, off) => v === null ? '?' : v ? `<span class="on">${on}</span>` : `<span class="off">${off}</span>`;
       const slotsHtml = g.slots.map((x, i) => `<div>Bet ${i + 1}: <b>${x.bet === null ? '?' : money(x.bet)}</b> · Auto Cash Out ${yes(x.autoCashOut, `ON at ${x.target}×`, `OFF${x.target ? ` (${x.target}×)` : ''}`)} · Auto Play ${yes(x.autoPlay, 'ON', 'OFF')}</div>`).join('');
       const html = `<div>In the game: balance <b>${ses.balance === null ? '?' : money(ses.balance)}</b></div>${slotsHtml}` +
-        (g.slots.length ? '<button type="button" id="useGame">Use the game\'s bet and target</button>' : '');
-      if (gp.dataset.html !== html) { gp.innerHTML = html; gp.dataset.html = html; }
+        (g.slots.length ? '<button type="button" id="useGame">Use the game\'s bet and target</button>' : '') +
+        g.slots.map((x, i) => `<button type="button" data-set="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Set Bet ${i + 1} in the game: ${money(stake)}, Auto Cash Out ${target}×</button>`).join('') +
+        (g.slots.length ? '<div class="setmsg" id="setMsg"></div><p class="fine">This fills in the amount and the Auto Cash Out target in the game. You still press Bet or Auto Play there yourself.</p>' : '');
+      if (gp.dataset.html !== html) { gp.innerHTML = html; gp.dataset.html = html; showSetNote(); }
       gp.hidden = false;
     } else gp.hidden = true;
     const wHtml = ses.warnings.map(w => `<div class="gw">⚠ ${w}</div>`).join('');
@@ -825,7 +829,19 @@
   });
 
   $('betMsg').addEventListener('keydown', e => { if (e.target.id === 'cashAt' && e.key === 'Enter') $('cashSave').click(); });
-  $('gamePanel').addEventListener('click', e => {
+  let setNote = null; // The answer to the last "Set in the game", kept while the panel re-renders.
+  const showSetNote = () => { const el = $('setMsg'); if (el && setNote) { el.textContent = setNote.text; el.className = `setmsg ${setNote.ok ? 'good' : 'bad'}`; } };
+  $('gamePanel').addEventListener('click', async e => {
+    const setBtn = e.target.closest('button[data-set]');
+    if (setBtn) {
+      const slot = Number(setBtn.dataset.set), bet = Number($('stakeInput').value);
+      setNote = {ok: true, text: 'Setting it in the game…'}; showSetNote();
+      const r = await post('/api/game/set', {slot, bet, target});
+      setNote = r.ok ? {ok: true, text: `Done at ${clock(Date.now())}: Bet ${slot + 1} in the game is ${money(r.shown.bet)} with Auto Cash Out at ${r.shown.target}×. Press Bet or Auto Play in the game when you are ready.`}
+        : {ok: false, text: r.error};
+      showSetNote();
+      return;
+    }
     if (e.target.id !== 'useGame') return;
     const g = state && state.session && state.session.game;
     if (!g || !g.slots.length) return;

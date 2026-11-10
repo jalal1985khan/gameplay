@@ -60,6 +60,19 @@ places bets itself.
 rate, how much of the stop-loss is used, and a row per bet (time, bet, exit, where the plane
 went, result). **Download** saves them as a CSV.
 
+**Set the bet from the monitor.** In the bet check, the box "In the game" shows what the game is
+set to. **Set Bet 1 / Bet 2 in the game** fills your bet amount and Auto Cash Out target into the
+game's own boxes and then reads them back: if the game shows something else (its own limits, for
+example), the monitor says so. It refuses while Auto Play is on for that bet, while a bet is placed
+or in flight, after the stop-loss, and for more than the money you have left today. It prepares
+the bet only: you press Bet, Cash Out and Auto Play in the game yourself. If Auto Cash Out is off
+and cannot be switched on from the monitor, switch it on in the game once and set the target again.
+
+**Game Auto Bet follows the game.** Where the game's bet panel can be read, tracking starts when
+you switch Auto Play on in the game, uses the game's own bet and target, counts only bets your
+balance could cover, and stops when you switch Auto Play off. The day's net is then the real
+change in your game balance.
+
 **Analysis of your captured rounds** (bottom of the page; choose the last 200, 1,000, 5,000 or all rounds):
 - the latest 60 rounds as a chart, against your cash-out target;
 - where rounds ended, next to the share the game's odds give (0.97 ÷ target);
@@ -87,7 +100,7 @@ If the game window is closed, click Start live capture again.
 
 ## What it does and doesn't do
 
-- Reads the game's results list from the page, including the game frame. It never clicks, types, places bets, or reads your password.
+- Reads the game's results list from the page, including the game frame. It never places bets, cashes out, switches Auto Play, or reads your password. It types in the game only when you press **Set Bet in the game**: the bet amount and the Auto Cash Out target.
 - Runs only on your computer: the page is served on 127.0.0.1 and refuses requests from other websites.
 - Does not predict rounds. Every round is random and independent; over time the game keeps about 3% of every bet.
 - Games drawn only on a canvas, with no text results list, can't be read.

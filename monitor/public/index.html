@@ -55,6 +55,8 @@
   .error .dot{background:var(--low)}
   .live{color:var(--text)}
   .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .layout .tiles{margin-top:24px}
+  .layout > div > h2:first-child{margin-top:0}
   .tile{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
   .tile span{display:block;color:var(--muted);font-size:12px}
   .tile strong{display:block;font-size:22px;margin-top:4px}
@@ -263,16 +265,6 @@
 
   <div class="layout">
   <div>
-  <div class="tiles">
-    <div class="tile"><span>Rounds captured</span><strong id="count">0</strong></div>
-    <div class="tile"><span>Latest</span><strong id="latest">—</strong></div>
-    <div class="tile"><span>Median</span><strong id="median">—</strong></div>
-    <div class="tile"><span>Reached 2×</span><strong id="over2">—</strong></div>
-  </div>
-
-  <h2><span>Live rounds <small class="empty">newest first</small></span><span><a href="/export.csv">Download CSV</a> · <button type="button" id="clear">Clear</button></span></h2>
-  <div class="chips" id="rounds"><span class="empty">No rounds yet.</span></div>
-
   <h2><span>Bet helper <small class="empty">real odds, your risk, and a bet check</small></span></h2>
   <div class="panel">
     <div class="helper-in">
@@ -310,6 +302,17 @@
     </div>
     <div class="advice" id="advice"></div>
   </div>
+
+
+  <div class="tiles">
+    <div class="tile"><span>Rounds captured</span><strong id="count">0</strong></div>
+    <div class="tile"><span>Latest</span><strong id="latest">—</strong></div>
+    <div class="tile"><span>Median</span><strong id="median">—</strong></div>
+    <div class="tile"><span>Reached 2×</span><strong id="over2">—</strong></div>
+  </div>
+
+  <h2><span>Live rounds <small class="empty">newest first</small></span><span><a href="/export.csv">Download CSV</a> · <button type="button" id="clear">Clear</button></span></h2>
+  <div class="chips" id="rounds"><span class="empty">No rounds yet.</span></div>
 
   <div class="note"><strong>This shows what happened, not what happens next.</strong> Every round is random and independent, so no pattern here predicts the next one. Over time the game keeps about 3% of every bet. The monitor only reads the results list; it never sees your password and never places a bet unless you press Place bet.</div>
   </div>

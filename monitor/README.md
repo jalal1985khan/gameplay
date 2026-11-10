@@ -100,6 +100,7 @@ If the game window is closed, click Start live capture again.
 ## What it does and doesn't do
 
 - Reads the game's results list from the page, including the game frame. It never reads your password. It types in the game only when you press **Set Bet in the game** (the bet amount and the Auto Cash Out target).
+- `POST /api/game/login` (`{username, password}`, admins only) types them into the game site's own login form in the game window and submits it. They are used for that one call and never stored, logged or sent back. If the site asks for more (a code, a puzzle), log in by hand through **Open game window**.
 - `POST /api/game/click` (`{slot, action: bet | cancel | cashout | autoplay, on}`) presses the game's Bet, Cancel, Cash Out or Auto Play button for one bet slot, on whatever game is open, real-money games included. It re-checks what the button shows just before pressing and presses nothing if that changed. Bet and Auto Play ON are refused after the stop-loss, during the cooldown after a loss, and for more than is left today.
 - When the stop-loss is reached the monitor switches the game's Auto Play off and cancels waiting bets by itself (`POST /api/game/cutoff` with `{enabled: false}` turns this off, `{force: true}` does it now). If two tries do not visibly switch Auto Play off it stops trying and leaves the alarm on.
 - Runs only on your computer: the page is served on 127.0.0.1 and refuses requests from other websites.

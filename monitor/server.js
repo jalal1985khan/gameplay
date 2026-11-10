@@ -627,6 +627,54 @@ function createMonitor({
     return frame;
   }
 
+  // Types what the admin entered into the game site's own login form and submits it. The
+  // username and password are used for this one call only: never stored, logged or sent back.
+  async function loginGame({username, password} = {}) {
+    const fail = error => ({ok: false, error});
+    username = String(username ?? '').trim();
+    password = String(password ?? '');
+    if (!username || !password) return fail('Enter the game username and password.');
+    if (username.length > 200 || password.length > 200) return fail('That is too long to be a username or password.');
+    if (!context) return fail('Click Start live capture first, so the game window is open.');
+    if (busy) return fail('Another game action is still running. Try again in a moment.');
+    busy = true;
+    try {
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+      const findField = async () => {
+        for (const page of context.pages()) for (const f of page.frames()) {
+          const pw = f.locator('input[type="password"]:visible').first();
+          if (await pw.count().catch(() => 0)) return {f, pw};
+        }
+        return null;
+      };
+      let form = await findField();
+      if (!form) {
+        const page = gamePage || context.pages().at(-1);
+        if (!page) return fail('The game window is not open.');
+        const opener = page.locator('button:visible, a:visible, [role="button"]:visible, div:visible, span:visible').filter({hasText: /^\s*(log ?in|sign ?in)\s*$/i}).last();
+        if (!await opener.count().catch(() => 0)) return fail('No login form or Login button was found in the game window. You may be logged in already.');
+        await opener.click({timeout: 3000});
+        for (let i = 0; i < 12 && !form; i++) { await wait(300); form = await findField(); }
+        if (!form) return fail('The Login button was pressed, but no password box appeared. Use Open game window to log in by hand.');
+      }
+      const {f, pw} = form;
+      const kinds = 'input:is([type="text"],[type="email"],[type="tel"],:not([type])):visible';
+      let user = f.locator(`form:has(input[type="password"]) ${kinds}`).first();
+      if (!await user.count().catch(() => 0)) user = f.locator(kinds).last();
+      if (!await user.count().catch(() => 0)) return fail('The username box was not found on the game\'s login form. Use Open game window to log in by hand.');
+      await user.fill(username, {timeout: 3000});
+      await pw.fill(password, {timeout: 3000});
+      await pw.press('Enter', {timeout: 3000});
+      for (let i = 0; i < 20; i++) {
+        await wait(400);
+        if (!await findField()) return {ok: true};
+      }
+      return fail('The game still shows its login form: the username or password was not accepted, or it asks for something more. Use Open game window to check.');
+    } catch (e) {
+      return fail(`The game's login form could not be filled (${String(e.message).split('\n')[0].slice(0, 120)}).`);
+    } finally { busy = false; }
+  }
+
   // Clicks a game control. `still` (optional) is checked again once the control is ready to be
   // pressed: the game's main button turns from Bet to Cancel to Cash Out and Auto Play is a
   // toggle, so a press that arrives after the state changed would do the opposite of what was
@@ -1054,6 +1102,7 @@ function createMonitor({
       if (pathname === '/api/bet') return send(placeBet(await readJson(req)));
       if (pathname === '/api/bet/undo') return send(undoBet());
       if (pathname === '/api/game/set') return send(await setGame(await readJson(req)));
+      if (pathname === '/api/game/login') return send(await loginGame(await readJson(req)));
       if (pathname === '/api/game/click') return send(await clickGame(await readJson(req)));
       if (pathname === '/api/game/cutoff') return send(await handleCutOff(await readJson(req)));
       if (pathname === '/api/settings') return send(saveSettings(await readJson(req)));

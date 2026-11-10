@@ -92,6 +92,11 @@
   .gamepanel{margin:0 0 10px;padding:10px 12px;border-radius:9px;background:#1b2130;border:1px solid var(--border);font-size:13px;color:var(--muted);text-align:left}
   .gamepanel b{color:var(--text)}
   .gamepanel .off{color:var(--low)}.gamepanel .on{color:var(--ok)}
+  .glogin{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;font-size:13px;color:var(--muted)}
+  .glogin input{flex:1 1 150px;padding:8px 10px;font-size:13px}
+  .glogin button{padding:8px 12px;font-size:13px}
+  .glogin .gmsg{flex:1 1 100%}.glogin .gmsg:empty{display:none}
+  body.viewer .glogin{display:none}
   .gamepanel .setmsg{margin-top:8px;font-size:13px}
   .gamepanel .press{display:flex;flex-wrap:wrap;align-items:center;gap:0 2px;margin-top:6px}
   .gamepanel .press span{margin:8px 8px 0 0}
@@ -307,6 +312,13 @@
   </div>
   <aside class="preview">
     <h2><span>Game window <small class="empty">live view</small></span><a id="openGame" href="/vnc/vnc.html?autoconnect=1&amp;resize=scale&amp;path=vnc/websockify" target="_blank" rel="noopener" hidden>Open game window</a></h2>
+    <form class="glogin" id="gameLogin" autocomplete="off">
+      <span>Log in to the game:</span>
+      <input id="gUser" type="text" placeholder="Game username or phone" autocomplete="off" aria-label="Game username or phone">
+      <input id="gPass" type="password" placeholder="Game password" autocomplete="new-password" aria-label="Game password">
+      <button type="submit" id="gGo">Log in to game</button>
+      <div class="gmsg" id="gMsg"></div>
+    </form>
     <div class="screen"><img id="screen" alt="Live view of the game window" hidden><div class="blank" id="screenBlank">The game window appears here once capture starts.</div></div>
     <p>A picture of what the game window shows right now. Log in and play in that window itself; this view is for watching only.</p>
 
@@ -846,6 +858,17 @@
   $('betMsg').addEventListener('keydown', e => { if (e.target.id === 'cashAt' && e.key === 'Enter') $('cashSave').click(); });
   let setNote = null; // The answer to the last "Set in the game", kept while the panel re-renders.
   const showSetNote = () => { const el = $('setMsg'); if (el && setNote) { el.textContent = setNote.text; el.className = `setmsg ${setNote.ok ? 'good' : 'bad'}`; } };
+  $('gameLogin').addEventListener('submit', async e => {
+    e.preventDefault();
+    const msg = $('gMsg'), say = (ok, text) => { msg.textContent = text; msg.className = `gmsg ${ok ? 'good' : 'bad'}`; };
+    const username = $('gUser').value.trim(), password = $('gPass').value;
+    if (!username || !password) return say(false, 'Enter the game username and password.');
+    $('gGo').disabled = true; say(true, 'Logging in to the game…');
+    const r = await post('/api/game/login', {username, password});
+    $('gPass').value = '';
+    $('gGo').disabled = false;
+    say(r.ok, r.ok ? 'Logged in to the game. Now open Aviator in the game window. The password was not saved.' : r.error || 'The login did not work.');
+  });
   $('gamePanel').addEventListener('click', async e => {
     const setBtn = e.target.closest('button[data-set]');
     if (setBtn) {

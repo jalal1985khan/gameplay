@@ -47,6 +47,9 @@ before(async () => {
     // /late: a betting page with a plain-number odds list (more entries than the game shows)
     // that changes, and the Aviator frame added only after a few seconds.
     if (req.url.startsWith('/late')) return res.end(ODDS_PAGE(gamePort));
+    if (req.url.startsWith('/site')) return res.end(`<!doctype html><input type="email" placeholder="newsletter"><button id="open" onclick="document.getElementById('f').hidden=false">Login</button>
+      <form id="f" hidden onsubmit="event.preventDefault();window.sent={u:this.username.value,p:this.password.value};if(this.password.value==='right-pass')this.remove()">
+      <input name="username" type="text"><input name="password" type="password"><button>Login</button></form>`);
     res.end(req.url.startsWith('/game') ? GAME : `<!doctype html><h1>Casino</h1><iframe src="http://127.0.0.1:${gamePort}/game" width="600" height="300"></iframe>`);
   });
   gamePort = await listen(game);
@@ -735,6 +738,22 @@ test('presses nothing when the game button changes between the check and the pre
   assert.match(r.error, /Nothing was pressed/);
   // Still Cash Out: a press would have turned it back to Bet.
   assert.equal(await gameFrame.evaluate(() => document.querySelector('.betButton').className), 'betButton cashout');
+  await post('/api/stop');
+});
+
+test("logs in to the game site with what the admin typed, and says so when the site refuses", async () => {
+  const login = body => post('/api/game/login', body).then(r => r.json());
+  assert.match((await login({username: 'me'})).error, /Enter the game username and password/);
+  await post('/api/start', {url: `http://localhost:${gamePort}/site`});
+  await until(state, s => s.capture.status === 'waiting');
+  const bad = await login({username: 'me', password: 'wrong-pass'});
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /still shows its login form/);
+  const page = monitor._context().pages().find(p => p.url().includes('/site'));
+  assert.deepEqual(await page.evaluate(() => window.sent), {u: 'me', p: 'wrong-pass'});
+  assert.deepEqual(await login({username: 'me', password: 'right-pass'}), {ok: true});
+  assert.match((await login({username: 'me', password: 'right-pass'})).error, /No login form|no password box/);
+  assert.ok(!JSON.stringify(await state()).includes('right-pass'));
   await post('/api/stop');
 });
 

@@ -12,6 +12,12 @@
   main{max-width:1440px;margin:0 auto;padding:28px 16px 40px}
   h1{font-size:22px;margin:0 0 4px}
   .head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+  .head h1{flex:1}
+  .who{display:flex;align-items:center;gap:10px;font-size:14px;opacity:.85}
+  .who button{font:inherit;font-size:13px;padding:4px 10px}
+  /* A view-only account: everything that changes the capture, the bets or the game is hidden. */
+  body.viewer #form,body.viewer .lead,body.viewer #openSettings,body.viewer #diagBtn,body.viewer #clear,
+  body.viewer button:not([data-size]):not([data-t]):not([data-lt]):not(#signOut):not(#diagClose):not(#remindOk):not(#alarmMute){display:none!important}
   .gear{display:grid;place-items:center;width:42px;height:42px;padding:0;border-radius:50%;background:var(--panel);color:var(--muted);border:1px solid var(--border)}
   .gear:hover{color:var(--text);border-color:var(--accent)}
   dialog{width:min(440px,calc(100vw - 32px));background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:14px;padding:20px}
@@ -193,6 +199,7 @@
 <main>
   <div class="head">
     <h1>✈ Aviator Live Monitor</h1>
+    <span class="who" id="who" hidden><span id="whoName"></span><button type="button" class="secondary-btn" id="signOut">Sign out</button></span>
     <button type="button" class="gear" id="openSettings" aria-label="Settings" title="Settings">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.62.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.6.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.49.42h3.8c.24 0 .45-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2Z"/></svg>
     </button>
@@ -412,7 +419,9 @@
   function connect() {
     const es = new EventSource('/events');
     es.onmessage = e => { state = JSON.parse(e.data); render(); };
-    es.onerror = () => {
+    es.onerror = async () => {
+      // Signed out, or the account was removed: back to the sign-in page.
+      try { if ((await fetch('/api/me')).status === 401) { location.href = '/login'; return; } } catch {}
       $('status').className = 'status error';
       $('statusText').textContent = 'Lost contact with the monitor. Is it still running in the terminal?';
     };
@@ -911,6 +920,14 @@
 
   $('url').addEventListener('input', () => { if (localError) { localError = ''; render(); } });
   setInterval(render, 5000); // Keeps "last new round … ago" current.
+  // With accounts on: who is signed in, and a view-only page for a viewer.
+  fetch('/api/me').then(r => r.json()).then(me => {
+    if (!me.ok || !me.auth) return;
+    document.body.classList.toggle('viewer', me.role !== 'admin');
+    $('whoName').textContent = me.role === 'admin' ? me.name : `${me.name} · view only`;
+    $('who').hidden = false;
+  }).catch(() => {});
+  $('signOut').addEventListener('click', async () => { await post('/api/logout'); location.href = '/login'; });
   connect();
 </script>
 <script src="/analysis.js"></script>

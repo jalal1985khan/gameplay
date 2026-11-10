@@ -1,8 +1,9 @@
 // Aviator Live Monitor: a small local server with one page. You enter the game URL and click
 // Start live capture; it opens the game in a real browser window where you log in as usual,
 // reads each finished round from the game's results list, and streams it to the monitor page.
-// Runs only on this computer (127.0.0.1). It never reads or stores logins, and never places bets:
-// on request it fills in the bet amount and Auto Cash Out target, and the person presses Bet.
+// It listens on this computer only (127.0.0.1) and never reads or stores game logins. To share it,
+// a web server in front passes requests on under MONITOR_PUBLIC_HOST; that works only once
+// accounts exist (node users.js add ...), and everyone then has to sign in.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +11,7 @@ const {spawn} = require('child_process');
 const AviatorMatch = require('./lib/match.js');
 const Analysis = require('./lib/analysis.js');
 const {createStore, atomicWrite} = require('./lib/store.js');
+const {createAuth} = require('./lib/auth.js');
 
 // Rounds kept in memory for the page and the analysis; the log on disk keeps every round.
 const MAX_ROUNDS = 50000;
@@ -31,6 +33,7 @@ const KEEP_RUNNING_ARGS = [
   '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
 ];
 const PAGE = path.join(__dirname, 'public', 'index.html');
+const LOGIN_PAGE = path.join(__dirname, 'public', 'login.html');
 
 function createMonitor({
   port = 4321,
@@ -38,6 +41,7 @@ function createMonitor({
   dataDir = path.join(__dirname, 'data'),
   profileDir = path.join(__dirname, 'browser-profile'),
   launch = null, // For tests: a function returning a Playwright browser context.
+  publicHost = '', // The name the monitor is shared under (e.g. monitor.example.com), behind a web server.
   staleMs = 180000, // Live, but the results list unread for this long: the game has stopped updating.
 } = {}) {
   const store = createStore(dataDir, MAX_ROUNDS);
@@ -65,6 +69,7 @@ function createMonitor({
     if (input.remindMinutes !== undefined) settings.remindMinutes = Number(input.remindMinutes);
     try { atomicWrite(settingsFile, JSON.stringify(settings)); } catch {}
     broadcast();
+    void maybeAutoCutOff();
     return {ok: true};
   }
   let session = newSession(1000);
@@ -126,6 +131,7 @@ function createMonitor({
       game: panel ? {slots, gameAutoPlay, at: panel.at} : null,
       bets: done.length, wins: done.filter(b => b.result === 'won').length,
       pending, awaiting, cooldownLeft, stopped, autoBet, follow,
+      autoCutOff: {enabled: autoCutOffEnabled, last: lastCutOff, gaveUp: cutOffFailures >= 2},
       // The game's bet panel can be read, so tracking can start and stop with the game's Auto Play.
       canFollow: slots.some(x => x.autoPlay !== null),
       // Stop-loss reached while the game is still betting by itself: sound the alarm.
@@ -225,6 +231,7 @@ function createMonitor({
     if (bet.result === 'lost') session.lastLossRound = Math.max(session.lastLossRound ?? -Infinity, bet.roundNo);
     saveSession();
     broadcast();
+    void maybeAutoCutOff();
     return {ok: true};
   }
 
@@ -234,6 +241,7 @@ function createMonitor({
     archiveDay();
     session = newSession(budget);
     session.balanceStart = panel ? panel.balance : null;
+    wasStopped = false; lastCutOff = null; lastCutOffAttemptAt = 0; cutOffFailures = 0;
     followGame(); // Auto Play still on in the game: the new day is tracked from its first round.
     saveSession();
     broadcast();
@@ -317,6 +325,9 @@ function createMonitor({
   let fundsSeen = null;
   let capture = {status: 'stopped', note: '', url: '', startedAt: 0, lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false};
   let context = null, stopping = false;
+  // One lock for everything that types or clicks in the game, so two actions never overlap.
+  let busy = false;
+  let autoCutOffEnabled = true, lastCutOff = null, lastCutOffAttemptAt = 0, wasStopped = false, cutOffFailures = 0;
   const clients = new Set();
   // Live picture of the game window: Chrome's screencast sends a JPEG whenever the page changes,
   // and each viewer gets them as a motion-JPEG stream that an <img> plays directly.
@@ -418,7 +429,7 @@ function createMonitor({
     if (stale !== wasStale) { wasStale = stale; broadcast(); }
   }, Math.min(5000, Math.max(250, staleMs / 4)));
 
-  function onPanel(p) {
+  function applyPanel(p) {
     if (!p || typeof p !== 'object' || !['waiting', 'live'].includes(capture.status)) return;
     const num = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
     const slots = Array.isArray(p.slots) ? p.slots.slice(0, 4).map(x => ({
@@ -436,6 +447,11 @@ function createMonitor({
       saveSession();
     }
     broadcast();
+  }
+
+  function onPanel(p) {
+    applyPanel(p);
+    void maybeAutoCutOff();
   }
 
   function onSnapshot(snap, frameUrl = '') {
@@ -472,6 +488,7 @@ function createMonitor({
       patch.lastRoundAt = now;
     }
     setCapture(patch);
+    void maybeAutoCutOff();
   }
 
   async function openBrowser() {
@@ -543,6 +560,7 @@ function createMonitor({
 
   async function stop(note = 'Capture stopped.') {
     castPage = null; castSession = null; frame = null; gamePage = null; panel = null; fundsSeen = null;
+    wasStopped = false; lastCutOffAttemptAt = 0; cutOffFailures = 0;
     const ctx = context;
     context = null;
     stopping = true;
@@ -595,10 +613,109 @@ function createMonitor({
     return {ok: true, frames: out};
   }
 
+  // Locates the live game frame containing at least `minSlots` bet blocks.
+  async function findGameFrame(minSlots = 1) {
+    if (!context) return null;
+    let frame = null;
+    for (const page of context.pages()) for (const f of page.frames()) {
+      let host = '';
+      try { host = new URL(f.url()).host; } catch {}
+      if (host === capture.source && await f.locator('.betSectionBlock').count().catch(() => 0) >= minSlots) frame = f;
+    }
+    return frame;
+  }
+
+  // Clicks a game control. `still` (optional) is checked again once the control is ready to be
+  // pressed: the game's main button turns from Bet to Cancel to Cash Out and Auto Play is a
+  // toggle, so a press that arrives after the state changed would do the opposite of what was
+  // asked. `fallback` sends a DOM click when a pointer click cannot reach the control; it is off
+  // for buttons that stake or release money, where a late click is worse than none.
+  async function clickControl(locator, {still, fallback = true} = {}) {
+    let why = '';
+    try {
+      if (still) {
+        await locator.click({trial: true, timeout: 1500}); // Scrolls to it and waits; presses nothing.
+        if (!await still()) return {ok: false, changed: true, why: 'the game changed before the button could be pressed'};
+        await locator.click({timeout: 400});
+      } else await locator.click({timeout: 1500});
+      return {ok: true, why: ''};
+    } catch (e) {
+      why = String(e.message).split('\n')[0];
+      if (fallback && /Timeout/.test(why)) {
+        try {
+          await locator.dispatchEvent('click', {}, {timeout: 1500});
+          return {ok: true, why};
+        } catch (e2) {
+          why = String(e2.message).split('\n')[0];
+        }
+      }
+      return {ok: false, why};
+    }
+  }
+
+  // Reads the live balance and all bet slots directly from the game frame DOM.
+  async function readFramePanel(frame) {
+    return frame.evaluate(() => {
+      const money = t => { const n = Number(String(t || '').replace(/[^0-9.]/g, '')); return Number.isFinite(n) && /\d/.test(String(t)) ? n : null; };
+      const isOn = el => !!el && /(^|[\s-])(active|on|checked|enabled|selected)([\s-]|$)/i.test(typeof el.className === 'string' ? el.className : '');
+      const isDisabled = el => !!(el && (el.disabled || el.getAttribute('aria-disabled') === 'true' || /(^|[\s-])disabled([\s-]|$)/i.test(typeof el.className === 'string' ? el.className : '')));
+      const btnState = (cls, text) => {
+        if (/cancel/i.test(cls)) return 'cancel';
+        if (/cash[\s_-]*out/i.test(cls)) return 'cashout';
+        if (/\bstart\b/i.test(cls)) return 'bet';
+        if (/cancel/i.test(text)) return 'cancel';
+        if (/cash\s*out/i.test(text)) return 'cashout';
+        if (/\bbet\b/i.test(text)) return 'bet';
+        return null;
+      };
+      const balanceEl = document.querySelector('.userBalanceMoney');
+      const slots = [...document.querySelectorAll('.betSectionBlock')].slice(0, 4).map(b => {
+        const input = b.querySelector('.betSectionInput');
+        const button = b.querySelector('.betButton');
+        const tag = b.querySelector('.autoPlayTagInput');
+        const sw = b.querySelector('.autoCashOut .switcher, .autoCashOut [class*=switch]');
+        const play = b.querySelector('.autoPlayButton');
+        const buttonCls = button && typeof button.className === 'string' ? button.className.replace('betButton', '').trim() : '';
+        const buttonText = button ? button.textContent.replace(/\s+/g, ' ').trim().slice(0, 40) : null;
+        return {
+          bet: input ? money(input.value) : null,
+          autoCashOut: tag ? !tag.disabled || isOn(sw) : null,
+          target: tag ? money(tag.value) : null,
+          autoPlay: play ? isOn(play) || /stop/i.test(play.textContent) : null,
+          buttonCls: buttonCls || null,
+          button: button ? btnState(buttonCls, buttonText || '') : null,
+          buttonText,
+          hasButton: !!button,
+          buttonDisabled: isDisabled(button),
+          hasAutoPlay: !!play,
+          autoPlayDisabled: isDisabled(play),
+        };
+      });
+      return {balance: balanceEl ? money(balanceEl.textContent) : null, slots};
+    });
+  }
+
+  function applyPanelFromFrame(fp) {
+    if (!fp) return;
+    applyPanel({
+      balance: fp.balance,
+      slots: fp.slots.map(s => ({bet: s.bet, target: s.target, autoCashOut: s.autoCashOut, autoPlay: s.autoPlay, button: s.buttonCls})),
+    });
+  }
+
+  const slotView = s => s ? {bet: s.bet, target: s.target, autoCashOut: s.autoCashOut, autoPlay: s.autoPlay, button: s.button, buttonText: s.buttonText} : null;
+
+  async function waitForPanelSlot(frame, slot, done, timeoutMs = 450) {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+      const fp = await readFramePanel(frame);
+      if (done(fp.slots[slot]) || Date.now() >= end) return fp;
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
   // Fills in the bet amount and the Auto Cash Out target of one bet slot in the game, when the
-  // person asks for it on the monitor page, then reads both back from the game. It prepares a
-  // bet; it never presses Bet or Cash Out and never switches Auto Play: those stay with the person.
-  let setting = false;
+  // person asks for it on the monitor page, then reads both back from the game.
   async function setGame({slot = 0, bet, target} = {}) {
     const fail = error => ({ok: false, error});
     slot = Number(slot);
@@ -616,15 +733,10 @@ function createMonitor({
     if (now.autoPlay === true) return fail('Auto Play is on for this bet in the game. Switch it off there before changing the bet.');
     if (now.button && !/start/i.test(now.button)) return fail('A bet is already placed or in flight on this slot. Wait for the round to finish.');
     if (wantBet && bet > st.left) return fail(`That is more than the ₹${Math.round(st.left)} you have left today.`);
-    if (setting) return fail('Still setting the last values. Try again in a moment.');
-    setting = true;
+    if (busy) return fail('Another game action is still running. Try again in a moment.');
+    busy = true;
     try {
-      let frame = null;
-      for (const page of context.pages()) for (const f of page.frames()) {
-        let host = '';
-        try { host = new URL(f.url()).host; } catch {}
-        if (host === capture.source && await f.locator('.betSectionBlock').count().catch(() => 0) > slot) frame = f;
-      }
+      const frame = await findGameFrame(slot + 1);
       if (!frame) return fail("The game's bet panel is not on screen.");
       const block = frame.locator('.betSectionBlock').nth(slot);
       const type = async (box, value) => { await box.fill(String(value), {timeout: 3000}); await box.blur({timeout: 3000}); };
@@ -638,13 +750,8 @@ function createMonitor({
           // part of this bet slot (Auto Play is a separate button and is never touched).
           for (const part of ['.autoCashOut .switcher', '.autoCashOut .autoPlaySwitcherText', '.autoCashOut [class*=switch]']) {
             if (!await box.isDisabled()) break;
-            const sw = block.locator(part).first();
-            // When the switch is below the visible edge of the game window a pointer click can't
-            // reach it, so the click is sent to the element itself.
-            await sw.click({timeout: 1500}).catch(async e => {
-              why = String(e.message).split('\n')[0];
-              if (/Timeout/.test(why)) await sw.dispatchEvent('click', {}, {timeout: 1500}).catch(() => {});
-            });
+            const c = await clickControl(block.locator(part).first());
+            if (c.why) why = c.why;
             for (let i = 0; i < 10 && await box.isDisabled(); i++) await new Promise(r => setTimeout(r, 100));
           }
           if (await box.isDisabled()) return {detail: why || 'the clicks were accepted but the switch did not change', ...fail(`${wantBet ? `The bet is set to ₹${bet}, but ` : ''}Auto Cash Out could not be switched on from here. Switch it on in the game, then set the target again.`)};
@@ -665,7 +772,182 @@ function createMonitor({
       return {ok: true, slot, shown};
     } catch (e) {
       return fail(`The game's bet boxes could not be filled in (${String(e.message).split('\n')[0]}).`);
-    } finally { setting = false; }
+    } finally { busy = false; }
+  }
+
+  // Clicks .betButton ('bet', 'cancel', 'cashout') or .autoPlayButton ('autoplay') on one slot,
+  // checking live game state and session limits, then reads back what the game shows afterwards.
+  async function clickGame({slot = 0, action = 'bet', on} = {}) {
+    const fail = error => ({ok: false, error});
+    slot = Number(slot);
+    const rawAction = String(action === undefined || action === null ? 'bet' : action).trim().toLowerCase().replace(/[\s_-]+/g, '');
+    const kind = rawAction === 'bet' || rawAction === 'start' ? 'bet'
+      : rawAction === 'cancel' ? 'cancel'
+      : rawAction === 'cashout' ? 'cashout'
+      : rawAction === 'autoplay' || rawAction === 'auto' ? 'autoplay'
+      : null;
+    if (!kind) return fail('Choose an action: bet, cancel, cashout, or autoplay.');
+    if (kind === 'autoplay' && on !== undefined && typeof on !== 'boolean') return fail('Set "on" to true or false for autoplay.');
+    if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
+    if (!Number.isInteger(slot) || slot < 0) return fail("The game's bet panel is not on screen.");
+    if (busy) return fail('Another game action is still running. Try again in a moment.');
+    busy = true;
+    try {
+      const frame = await findGameFrame(slot + 1);
+      if (!frame) return fail("The game's bet panel is not on screen.");
+      const fp = await readFramePanel(frame);
+      const before = fp.slots[slot];
+      if (!before) return fail("The game's bet panel is not on screen.");
+      const st = sessionState();
+      const block = frame.locator('.betSectionBlock').nth(slot);
+
+      let targetLocator, done, mismatchError;
+      if (kind === 'autoplay') {
+        if (!before.hasAutoPlay) return fail('The Auto Play button was not found on this slot.');
+        const wantOn = on !== undefined ? on : !before.autoPlay;
+        if (wantOn) {
+          if (st.stopped) return fail('Stop-loss reached. You are done for today.');
+          if (!(before.bet > 0)) return fail('Enter a bet above ₹0 in the game first.');
+          if (before.bet > st.left) return fail(`That is more than the ₹${Math.round(st.left)} you have left today.`);
+        }
+        if (before.autoPlay === wantOn) {
+          applyPanelFromFrame(fp);
+          return {ok: true, slot, action: kind, changed: false, shown: slotView(before)};
+        }
+        if (before.autoPlayDisabled) return fail('The Auto Play button is disabled in the game right now.');
+        targetLocator = block.locator('.autoPlayButton');
+        done = s => s && s.autoPlay === wantOn;
+        mismatchError = s => `Not switched as asked: Auto Play is still ${s && s.autoPlay ? 'ON' : 'OFF'} in the game.`;
+      } else {
+        if (!before.hasButton) return fail('The Bet button was not found on this slot.');
+        if (kind === 'bet') {
+          if (st.stopped) return fail('Stop-loss reached. You are done for today.');
+          if (st.cooldownLeft) return fail(`After a loss, wait ${st.cooldownLeft} more round${st.cooldownLeft > 1 ? 's' : ''}.`);
+          if (before.autoPlay === true) return fail('Auto Play is on for this bet in the game. Switch it off before pressing Bet.');
+          if (before.button !== 'bet') return fail('A bet is already placed or in flight on this slot.');
+          if (!(before.bet > 0)) return fail('Enter a bet above ₹0 in the game first.');
+          if (before.bet > st.left) return fail(`That is more than the ₹${Math.round(st.left)} you have left today.`);
+        } else if (kind === 'cancel') {
+          if (before.button !== 'cancel') return fail('There is no waiting bet to cancel on this slot.');
+        } else if (kind === 'cashout') {
+          if (before.button !== 'cashout') return fail('There is no active bet to cash out on this slot.');
+        }
+        if (before.buttonDisabled) {
+          const label = kind === 'cashout' ? 'Cash Out' : kind === 'cancel' ? 'Cancel' : 'Bet';
+          return fail(`The ${label} button is disabled in the game right now.`);
+        }
+        targetLocator = block.locator('.betButton');
+        done = kind === 'bet' ? s => s && s.button !== 'bet'
+          : kind === 'cancel' ? s => s && s.button !== 'cancel' && s.button !== 'cashout'
+          : s => s && s.button !== 'cashout';
+        mismatchError = s => {
+          if (kind === 'cancel' && s && s.button === 'cashout') return 'The round already started before Cancel could land; Cash Out is now shown.';
+          const label = s && s.button === 'cancel' ? 'Cancel' : s && s.button === 'cashout' ? 'Cash Out' : s && s.button === 'bet' ? 'Bet' : (s && s.buttonText) || 'unchanged';
+          return `Not clicked as asked: the game button still shows ${label}. Check the game window.`;
+        };
+      }
+
+      const still = async () => {
+        const s = (await readFramePanel(frame)).slots[slot];
+        return !!s && (kind === 'autoplay' ? s.autoPlay === before.autoPlay : s.button === kind);
+      };
+      const clicked = await clickControl(targetLocator, {still, fallback: false});
+      if (!clicked.ok) return fail(clicked.changed ? `Nothing was pressed: ${clicked.why}. Check the game window.` : `The game's ${kind} button could not be clicked (${clicked.why}).`);
+      const afterPanel = await waitForPanelSlot(frame, slot, done, 450);
+      applyPanelFromFrame(afterPanel);
+      const after = afterPanel.slots[slot];
+      if (!done(after)) return {ok: false, slot, action: kind, shown: slotView(after), error: mismatchError(after)};
+      return {ok: true, slot, action: kind, changed: true, shown: slotView(after)};
+    } catch (e) {
+      return fail(`The game's button could not be clicked (${String(e.message).split('\n')[0]}).`);
+    } finally { busy = false; }
+  }
+
+  // Turns off Auto Play and cancels waiting bets across every slot when the session stop-loss
+  // is reached (or when forced). Turns Auto Play off first so it cannot re-place a cancelled bet.
+  async function autoCutOff({force = false} = {}) {
+    const fail = error => ({ok: false, error});
+    if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
+    const st = sessionState();
+    if (!force && !st.stopped) return {ok: true, triggered: false, stopped: false, enabled: autoCutOffEnabled, actions: []};
+    if (busy) return {busy: true, ...fail('Another game action is still running. Try again in a moment.')};
+    busy = true;
+    try {
+      const frame = await findGameFrame(1);
+      if (!frame) return fail("The game's bet panel is not on screen.");
+      let fp = await readFramePanel(frame);
+      const actions = [];
+      const stopSlot = async (i, action, locator, disabled, still, done, stayedMsg) => {
+        if (disabled) { actions.push({slot: i, action, ok: false, error: `The ${action === 'autoplay' ? 'Auto Play' : 'Cancel'} button is disabled.`}); return; }
+        const c = await clickControl(locator, {fallback: false, still: async () => { fp = await readFramePanel(frame); return !!fp.slots[i] && still(fp.slots[i]); }});
+        if (c.changed) return; // Already off or gone by itself: nothing to press.
+        if (!c.ok) { actions.push({slot: i, action, ok: false, error: c.why}); return; }
+        fp = await waitForPanelSlot(frame, i, done, 450);
+        const ok = done(fp.slots[i]);
+        actions.push({slot: i, action, ok, ...(ok ? {} : {error: stayedMsg})});
+      };
+      for (let i = 0; i < fp.slots.length; i++) {
+        const block = frame.locator('.betSectionBlock').nth(i);
+        if (fp.slots[i].autoPlay === true) {
+          await stopSlot(i, 'autoplay', block.locator('.autoPlayButton'), fp.slots[i].autoPlayDisabled, s => s.autoPlay === true, s => s && s.autoPlay === false, 'Auto Play stayed ON in the game.');
+        }
+        const cur = fp.slots[i];
+        if (cur && cur.button === 'cancel') {
+          await stopSlot(i, 'cancel', block.locator('.betButton'), cur.buttonDisabled, s => s.button === 'cancel', s => s && s.button !== 'cancel', 'Waiting bet stayed active in the game.');
+        }
+      }
+      const failed = actions.filter(a => !a.ok);
+      const result = {
+        ok: failed.length === 0,
+        triggered: actions.length > 0,
+        stopped: st.stopped,
+        forced: !!force,
+        enabled: autoCutOffEnabled,
+        actions,
+        slots: fp.slots.map(slotView),
+        ...(failed.length ? {error: `Cut-off incomplete: ${failed.map(f => `Bet ${f.slot + 1} ${f.action} (${f.error})`).join('; ')}`} : {}),
+      };
+      if (actions.length > 0) {
+        lastCutOff = {at: Date.now(), ok: result.ok, triggered: true, forced: result.forced, actions, ...(result.error ? {error: result.error} : {})};
+      }
+      applyPanelFromFrame(fp);
+      return result;
+    } catch (e) {
+      return fail(`Stop-loss cut-off failed (${String(e.message).split('\n')[0]}).`);
+    } finally { busy = false; }
+  }
+
+  async function handleCutOff({enabled, force} = {}) {
+    cutOffFailures = 0; // Asked for by the person: try again.
+    if (enabled !== undefined && typeof enabled !== 'boolean') return {ok: false, error: 'Set "enabled" to true or false.'};
+    if (force !== undefined && typeof force !== 'boolean') return {ok: false, error: 'Set "force" to true or false.'};
+    if (enabled !== undefined) autoCutOffEnabled = enabled;
+    if (force) return autoCutOff({force: true});
+    const st = sessionState();
+    if (enabled !== undefined) {
+      if (autoCutOffEnabled && context && capture.status === 'live' && st.stopped) return autoCutOff();
+      broadcast();
+      return {ok: true, enabled: autoCutOffEnabled, triggered: false, stopped: st.stopped, actions: []};
+    }
+    return autoCutOff();
+  }
+
+  async function maybeAutoCutOff() {
+    if (!context || capture.status !== 'live') return;
+    const st = sessionState();
+    const justStopped = st.stopped && !wasStopped;
+    wasStopped = st.stopped;
+    if (!autoCutOffEnabled || !st.stopped || busy) return;
+    // Auto Play is a toggle: if two tries did not visibly switch it off, pressing it again could
+    // switch it back on, so the monitor stops trying and leaves the alarm to the person.
+    if (cutOffFailures >= 2) return;
+    const slots = panel ? panel.slots : [];
+    const needsCutOff = slots.some(x => x.autoPlay === true || (x.button && /cancel/i.test(x.button)));
+    if (!justStopped && !needsCutOff) return;
+    if (!justStopped && Date.now() - lastCutOffAttemptAt < 2500) return;
+    lastCutOffAttemptAt = Date.now();
+    const r = await autoCutOff().catch(() => null);
+    if (r && r.triggered) { cutOffFailures = r.ok ? 0 : cutOffFailures + 1; if (!r.ok) broadcast(); }
   }
 
   function clear() {
@@ -700,14 +982,50 @@ function createMonitor({
     req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { resolve({}); } });
   });
 
+  const auth = createAuth(dataDir);
+  publicHost = String(publicHost || '').trim().toLowerCase();
+
   const server = http.createServer(async (req, res) => {
-    // Only this computer's own browser may use the monitor: other websites can't open game
-    // windows or read rounds through it (checked by Host, and by Origin on every action).
-    const host = req.headers.host || '';
-    if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) { res.writeHead(403).end('forbidden'); return; }
+    // Reached as localhost by this computer's own browser, or under the shared name through the
+    // web server in front. Other websites can't use it (checked by Host, and by Origin on every
+    // action), and the shared name works only with accounts, never open.
+    const host = (req.headers.host || '').toLowerCase();
+    const shared = !!publicHost && host === publicHost;
+    if (!shared && !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) { res.writeHead(403).end('forbidden'); return; }
     const {pathname, searchParams} = new URL(req.url, `http://${host}`);
+    const json = (code, body, headers = {}) => res.writeHead(code, {'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers}).end(JSON.stringify(body));
+    const authOn = auth.enabled();
+    if (shared && !authOn) { res.writeHead(403).end('Add an account first: node users.js add <name> admin'); return; }
+    const token = (/(?:^|;\s*)monitor_sid=([a-f0-9]{64})/.exec(req.headers.cookie || '') || [])[1] || '';
+    const user = authOn ? auth.who(token) : {name: '', role: 'admin'};
+    const cookie = (value, maxAge) => `monitor_sid=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''}`;
+    if (req.method === 'POST' && req.headers.origin && ![`http://${host}`, ...(shared ? [`https://${host}`] : [])].includes(req.headers.origin)) { res.writeHead(403).end('forbidden'); return; }
+    if (req.method === 'GET' && pathname === '/login') {
+      if (user) { res.writeHead(302, {Location: '/'}).end(); return; }
+      res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'});
+      return fs.createReadStream(LOGIN_PAGE).pipe(res);
+    }
+    if (req.method === 'POST' && pathname === '/api/login') {
+      if (!authOn) return json(400, {ok: false, error: 'This monitor has no accounts.'});
+      const b = await readJson(req);
+      // Behind the web server every request comes from this computer; it passes the real address on.
+      const address = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+      await new Promise(r => setTimeout(r, 250)); // Slows guessing.
+      const r = auth.login(b.name, b.password, address);
+      if (!r.ok) return json(r.locked ? 429 : 401, {ok: false, error: r.error});
+      return json(200, {ok: true, name: r.name, role: r.role}, {'Set-Cookie': cookie(r.token, r.maxAge)});
+    }
+    if (!user) {
+      if (req.method === 'GET' && pathname === '/') { res.writeHead(302, {Location: '/login'}).end(); return; }
+      return json(401, {ok: false, error: 'Sign in first.'});
+    }
+    if (req.method === 'POST' && pathname === '/api/logout') { auth.logout(token); return json(200, {ok: true}, {'Set-Cookie': cookie('', 0)}); }
+    if (req.method === 'GET' && pathname === '/api/me') return json(200, {ok: true, auth: authOn, name: user.name, role: user.role});
+    // A viewer can look at everything on the page and change nothing: not the capture, the
+    // tracked bets, the settings, or anything in the game.
+    const viewer = user.role !== 'admin';
+    if (viewer && (req.method === 'POST' || pathname === '/api/inspect' || pathname === '/api/diagnose')) return json(403, {ok: false, error: 'This account can only view.'});
     if (req.method === 'POST') {
-      if (req.headers.origin && req.headers.origin !== `http://${host}`) { res.writeHead(403).end('forbidden'); return; }
       const send = r => res.writeHead(r.ok ? 200 : 400, {'Content-Type': 'application/json'}).end(JSON.stringify(r));
       if (pathname === '/api/start') return send(await start((await readJson(req)).url));
       if (pathname === '/api/stop') return send(await stop());
@@ -715,6 +1033,8 @@ function createMonitor({
       if (pathname === '/api/bet') return send(placeBet(await readJson(req)));
       if (pathname === '/api/bet/undo') return send(undoBet());
       if (pathname === '/api/game/set') return send(await setGame(await readJson(req)));
+      if (pathname === '/api/game/click') return send(await clickGame(await readJson(req)));
+      if (pathname === '/api/game/cutoff') return send(await handleCutOff(await readJson(req)));
       if (pathname === '/api/settings') return send(saveSettings(await readJson(req)));
       if (pathname === '/api/autobet') { const b = await readJson(req); return send(b.on ? startAutoBet(b) : stopAutoBet()); }
       if (pathname === '/api/bet/cashout') return send(cashOut(await readJson(req)));
@@ -783,7 +1103,7 @@ module.exports = {createMonitor};
 
 if (require.main === module) {
   const port = Number(process.env.PORT) || 4321;
-  const monitor = createMonitor({port, headless: process.env.MONITOR_HEADLESS === '1'});
+  const monitor = createMonitor({port, headless: process.env.MONITOR_HEADLESS === '1', publicHost: process.env.MONITOR_PUBLIC_HOST || ''});
   monitor.listen().then(p => {
     const url = `http://localhost:${p}`;
     console.log(`Aviator Live Monitor is running at ${url}  (press Ctrl+C to quit)`);

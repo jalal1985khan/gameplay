@@ -528,3 +528,295 @@ test('never records betting odds; records the x-marked Aviator list once it appe
   assert.ok(top.candidates.some(c => !c.marked));
   await post('/api/stop');
 });
+
+const wireButtons = gameFrame => gameFrame.evaluate(() => {
+  const betBtn = document.querySelector('.betButton');
+  const playBtn = document.querySelector('.autoPlayButton');
+  betBtn.addEventListener('click', () => {
+    if (betBtn.classList.contains('start')) {
+      betBtn.className = 'betButton cancel';
+      betBtn.textContent = 'cancel';
+    } else {
+      betBtn.className = 'betButton start';
+      betBtn.textContent = 'bet';
+    }
+  });
+  playBtn.addEventListener('click', () => {
+    const on = playBtn.classList.toggle('active');
+    playBtn.textContent = on ? 'stop' : 'auto play';
+  });
+});
+
+test('clicks .betButton and .autoPlayButton via /api/game/click with safety checks', async () => {
+  await post('/api/start', {url: `http://localhost:${gamePort}/`});
+  await until(state, s => s.capture.status === 'live' && s.latest === 7.77 && s.session.game && s.session.game.slots.length > 0);
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  await wireButtons(gameFrame);
+
+  const click = body => post('/api/game/click', body).then(r => r.json());
+  const set = body => post('/api/game/set', body).then(r => r.json());
+  const round = async v => {
+    const before = (await state()).count;
+    await gameFrame.evaluate(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
+    return until(state, s => s.count > before);
+  };
+
+  await post('/api/session', {budget: 1000});
+  await set({slot: 0, bet: 10, target: 1.8});
+
+  // Validation and guardrails.
+  assert.match((await click({slot: 0, action: 'jump'})).error, /Choose an action/);
+  assert.match((await click({slot: 3, action: 'bet'})).error, /not on screen/);
+  await gameFrame.evaluate(() => { document.querySelector('.betSectionInput').value = '5000'; });
+  assert.match((await click({slot: 0, action: 'bet'})).error, /more than the ₹1000/);
+  await gameFrame.evaluate(() => { document.querySelector('.betSectionInput').value = '10'; });
+
+  // Place bet -> cancel waiting bet -> cash out an in-flight bet.
+  const placed = await click({slot: 0, action: 'bet'});
+  assert.equal(placed.ok, true);
+  assert.equal(placed.changed, true);
+  assert.equal(placed.shown.button, 'cancel');
+  assert.match((await click({slot: 0, action: 'bet'})).error, /already placed/);
+  assert.match((await click({slot: 0, action: 'cashout'})).error, /no active bet to cash out/);
+
+  const cancelled = await click({slot: 0, action: 'cancel'});
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.shown.button, 'bet');
+  assert.match((await click({slot: 0, action: 'cancel'})).error, /no waiting bet to cancel/);
+
+  await gameFrame.evaluate(() => {
+    const b = document.querySelector('.betButton');
+    b.className = 'betButton cashout';
+    b.textContent = 'cash out';
+  });
+  const cashed = await click({slot: 0, action: 'cashout'});
+  assert.equal(cashed.ok, true);
+  assert.equal(cashed.shown.button, 'bet');
+
+  // Toggle Auto Play ON, idempotent ON, refusal on Bet while Auto Play is ON, then toggle OFF.
+  const autoOn = await click({slot: 0, action: 'autoplay', on: true});
+  assert.equal(autoOn.ok, true);
+  assert.equal(autoOn.changed, true);
+  assert.equal(autoOn.shown.autoPlay, true);
+  const autoAgain = await click({slot: 0, action: 'autoplay', on: true});
+  assert.equal(autoAgain.ok, true);
+  assert.equal(autoAgain.changed, false);
+  assert.match((await click({slot: 0, action: 'bet'})).error, /Auto Play is on/);
+  const autoOff = await click({slot: 0, action: 'autoplay'});
+  assert.equal(autoOff.ok, true);
+  assert.equal(autoOff.shown.autoPlay, false);
+
+  // Cooldown after a loss blocks Bet, and stop-loss blocks Bet + Auto Play ON while still allowing Cancel/Cash Out/Auto Play OFF.
+  await post('/api/bet', {stake: 10, target: 2});
+  await round(1.2);
+  assert.match((await click({slot: 0, action: 'bet'})).error, /wait 3 more rounds/);
+
+  await post('/api/session', {budget: 100});
+  await post('/api/bet', {stake: 25, target: 2});
+  await round(1.1);
+  assert.equal((await state()).session.stopped, true);
+  assert.match((await click({slot: 0, action: 'bet'})).error, /Stop-loss/);
+  assert.match((await click({slot: 0, action: 'autoplay', on: true})).error, /Stop-loss/);
+  await gameFrame.evaluate(() => {
+    const b = document.querySelector('.betButton');
+    b.className = 'betButton cancel';
+    b.textContent = 'cancel';
+  });
+  assert.equal((await click({slot: 0, action: 'cancel'})).ok, true);
+
+  // CSRF check.
+  assert.equal((await post('/api/game/click', {slot: 0, action: 'bet'}, {Origin: 'https://evil.example'})).status, 403);
+  assert.equal((await post('/api/game/cutoff', {}, {Origin: 'https://evil.example'})).status, 403);
+  await post('/api/stop');
+});
+
+test('autoCutOff stops Auto Play and cancels waiting bets automatically on stop-loss and via /api/game/cutoff', async () => {
+  await post('/api/start', {url: `http://localhost:${gamePort}/`});
+  await until(state, s => s.capture.status === 'live' && s.latest === 7.77 && s.session.game && s.session.game.slots.length > 0);
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  await wireButtons(gameFrame);
+
+  const click = body => post('/api/game/click', body).then(r => r.json());
+  const set = body => post('/api/game/set', body).then(r => r.json());
+  const cutoff = body => post('/api/game/cutoff', body).then(r => r.json());
+  const round = async v => {
+    const before = (await state()).count;
+    await gameFrame.evaluate(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
+    return until(state, s => s.count > before);
+  };
+
+  await post('/api/session', {budget: 1000});
+  assert.deepEqual(await cutoff({}), {ok: true, triggered: false, stopped: false, enabled: true, actions: []});
+
+  // 1. Automatic stop-loss cut-off triggered by real balance drop.
+  await set({slot: 0, bet: 10, target: 2});
+  await click({slot: 0, action: 'autoplay', on: true});
+  await gameFrame.evaluate(() => {
+    const b = document.querySelector('.betButton');
+    b.className = 'betButton cancel';
+    b.textContent = 'cancel';
+  });
+  await until(state, s => s.session.follow);
+
+  await gameFrame.evaluate(() => { document.querySelector('.userBalanceMoney').textContent = '₹700.00'; });
+  const afterDrop = (await until(state, s => s.session.stopped && !s.session.game.gameAutoPlay && s.session.game.slots[0].button === 'start')).session;
+  assert.equal(afterDrop.follow, false);
+  assert.equal(afterDrop.alarm, false);
+  assert.equal(afterDrop.autoCutOff.last.ok, true);
+  assert.equal(afterDrop.autoCutOff.last.triggered, true);
+  assert.deepEqual(afterDrop.autoCutOff.last.actions.map(a => a.action), ['autoplay', 'cancel']);
+
+  // 2. Disable autoCutOff, hit stop-loss via losing round while Auto Play follows, then re-enable to trigger immediately.
+  await gameFrame.evaluate(() => { document.querySelector('.userBalanceMoney').textContent = '₹1,000.00'; });
+  await until(state, s => s.session.balance === 1000);
+  await post('/api/session', {budget: 100});
+  assert.equal((await cutoff({enabled: false})).enabled, false);
+  await set({slot: 0, bet: 25, target: 2});
+  await click({slot: 0, action: 'autoplay', on: true});
+  await gameFrame.evaluate(() => {
+    const b = document.querySelector('.betButton');
+    b.className = 'betButton cancel';
+    b.textContent = 'cancel';
+  });
+  await until(state, s => s.session.follow);
+  const stoppedWhileDisabled = (await round(1.1)).session;
+  assert.equal(stoppedWhileDisabled.stopped, true);
+  assert.equal(stoppedWhileDisabled.game.gameAutoPlay, true, 'auto cut-off was disabled so Auto Play stayed ON');
+
+  const reenabled = await cutoff({enabled: true});
+  assert.equal(reenabled.ok, true);
+  assert.equal(reenabled.enabled, true);
+  assert.equal(reenabled.triggered, true);
+  assert.deepEqual(reenabled.actions.map(a => a.action), ['autoplay', 'cancel']);
+  const afterReenable = (await state()).session;
+  assert.equal(afterReenable.game.gameAutoPlay, false);
+  assert.equal(afterReenable.game.slots[0].button, 'start');
+
+  // 3. Forced cut-off works even before stop-loss is reached.
+  await post('/api/session', {budget: 1000});
+  await click({slot: 0, action: 'autoplay', on: true});
+  await gameFrame.evaluate(() => {
+    const b = document.querySelector('.betButton');
+    b.className = 'betButton cancel';
+    b.textContent = 'cancel';
+  });
+  const forced = await cutoff({force: true});
+  assert.equal(forced.ok, true);
+  assert.equal(forced.forced, true);
+  assert.equal(forced.stopped, false);
+  assert.equal(forced.triggered, true);
+  assert.deepEqual(forced.actions.map(a => a.action), ['autoplay', 'cancel']);
+  assert.equal(forced.slots[0].autoPlay, false);
+  assert.equal(forced.slots[0].button, 'bet');
+  await post('/api/stop');
+});
+
+test('presses nothing when the game button changes between the check and the press', async () => {
+  await post('/api/start', {url: `http://localhost:${gamePort}/`});
+  await until(state, s => s.capture.status === 'live' && s.session.game && s.session.game.slots.length > 0);
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  await wireButtons(gameFrame);
+  await post('/api/session', {budget: 1000});
+
+  // A waiting bet (Cancel). Something covers the button for a moment, and when it clears the
+  // round has started: the same button is now Cash Out.
+  await gameFrame.evaluate(() => {
+    const b = document.querySelector('.betButton');
+    b.className = 'betButton cancel';
+    b.textContent = 'cancel';
+    const r = b.getBoundingClientRect();
+    const cover = document.createElement('div');
+    cover.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${Math.max(r.width, 20)}px;height:${Math.max(r.height, 20)}px;z-index:9999`;
+    document.body.appendChild(cover);
+    setTimeout(() => { b.className = 'betButton cashout'; b.textContent = 'cash out'; cover.remove(); }, 400);
+  });
+  const r = await post('/api/game/click', {slot: 0, action: 'cancel'}).then(x => x.json());
+  assert.equal(r.ok, false);
+  assert.match(r.error, /Nothing was pressed/);
+  // Still Cash Out: a press would have turned it back to Bet.
+  assert.equal(await gameFrame.evaluate(() => document.querySelector('.betButton').className), 'betButton cashout');
+  await post('/api/stop');
+});
+
+test('accounts: sign-in is required once an account exists, a viewer can look but not act, the shared name needs accounts', async () => {
+  const {createAuth} = require('../lib/auth.js');
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'monitor-auth-'));
+  const dataDir = path.join(dir2, 'data');
+  const m = createMonitor({port: 0, headless: true, dataDir, profileDir: path.join(dir2, 'profile'), publicHost: 'monitor.example.test'});
+  const p = await m.listen();
+  const call = (pathname, {method = 'GET', body, cookie, host = `127.0.0.1:${p}`, headers = {}} = {}) => new Promise((resolve, reject) => {
+    const req = http.request({host: '127.0.0.1', port: p, path: pathname, method, headers: {Host: host, 'Content-Type': 'application/json', ...(cookie ? {Cookie: cookie} : {}), ...headers}}, res => {
+      let text = '';
+      res.on('data', c => { text += c; });
+      res.on('end', () => { let data = null; try { data = JSON.parse(text); } catch {} resolve({status: res.statusCode, headers: res.headers, text, data}); });
+    });
+    req.on('error', reject);
+    req.end(body ? JSON.stringify(body) : undefined);
+  });
+  try {
+    // No accounts: open to this computer as before, closed under the shared name.
+    assert.equal((await call('/api/state')).status, 200);
+    assert.deepEqual((await call('/api/me')).data, {ok: true, auth: false, name: '', role: 'admin'});
+    assert.equal((await call('/api/state', {host: 'monitor.example.test'})).status, 403);
+    assert.equal((await call('/api/state', {host: 'evil.example'})).status, 403);
+
+    const auth = createAuth(dataDir);
+    assert.equal(auth.addUser('boss', 'admin', 'short').ok, false);
+    assert.equal(auth.addUser('boss', 'owner', 'long-enough-1').ok, false);
+    assert.equal(auth.addUser('boss', 'admin', 'long-enough-1').ok, true);
+    assert.equal(auth.addUser('client', 'viewer', 'long-enough-2').ok, true);
+    assert.ok(!fs.readFileSync(path.join(dataDir, 'users.json'), 'utf8').includes('long-enough'), 'passwords are not stored');
+
+    // Now everything needs a sign-in, on this computer too.
+    assert.equal((await call('/api/state')).status, 401);
+    assert.equal((await call('/events')).status, 401);
+    assert.equal((await call('/preview')).status, 401);
+    assert.equal((await call('/export.csv')).status, 401);
+    assert.equal((await call('/api/game/click', {method: 'POST', body: {slot: 0, action: 'bet'}})).status, 401);
+    const home = await call('/');
+    assert.equal(home.status, 302);
+    assert.equal(home.headers.location, '/login');
+    assert.match((await call('/login')).text, /Sign in/);
+
+    assert.equal((await call('/api/login', {method: 'POST', body: {name: 'client', password: 'wrong-password'}})).status, 401);
+    assert.equal((await call('/api/login', {method: 'POST', body: {name: 'nobody', password: 'long-enough-2'}})).status, 401);
+    assert.equal((await call('/api/login', {method: 'POST', body: {name: 'client', password: 'long-enough-2'}, headers: {Origin: 'https://evil.example'}})).status, 403);
+
+    // The viewer, through the shared name over https.
+    const shared = {host: 'monitor.example.test', headers: {'X-Forwarded-Proto': 'https', Origin: 'https://monitor.example.test'}};
+    const inV = await call('/api/login', {method: 'POST', body: {name: 'Client', password: 'long-enough-2'}, ...shared});
+    assert.equal(inV.status, 200);
+    assert.match(inV.headers['set-cookie'][0], /HttpOnly; SameSite=Lax; Max-Age=\d+; Secure/);
+    const viewer = inV.headers['set-cookie'][0].split(';')[0];
+    assert.deepEqual((await call('/api/me', {cookie: viewer, ...shared})).data, {ok: true, auth: true, name: 'client', role: 'viewer'});
+    assert.equal((await call('/api/state', {cookie: viewer, ...shared})).status, 200);
+    assert.equal((await call('/api/analysis', {cookie: viewer, ...shared})).status, 200);
+    assert.equal((await call('/', {cookie: viewer, ...shared})).status, 200);
+    for (const route of ['/api/start', '/api/stop', '/api/clear', '/api/bet', '/api/settings', '/api/session', '/api/game/set', '/api/game/click', '/api/game/cutoff', '/api/autobet']) {
+      const r = await call(route, {method: 'POST', body: {url: 'http://localhost:1/', slot: 0, action: 'bet', bet: 5, budget: 5}, cookie: viewer, ...shared});
+      assert.equal(r.status, 403, route);
+      assert.match(r.data.error, /only view/);
+    }
+    assert.equal((await call('/api/diagnose', {cookie: viewer, ...shared})).status, 403);
+    assert.equal(m.state().capture.status, 'stopped');
+
+    // The admin can act.
+    const inA = await call('/api/login', {method: 'POST', body: {name: 'boss', password: 'long-enough-1'}});
+    const admin = inA.headers['set-cookie'][0].split(';')[0];
+    assert.ok(!/Secure/.test(inA.headers['set-cookie'][0]), 'plain http on this computer');
+    assert.equal((await call('/api/settings', {method: 'POST', body: {pauseRounds: 2}, cookie: admin})).status, 200);
+    assert.equal(m.state().settings.pauseRounds, 2);
+
+    // Signing out, and removing an account, both end the session.
+    assert.equal((await call('/api/logout', {method: 'POST', cookie: admin})).status, 200);
+    assert.equal((await call('/api/state', {cookie: admin})).status, 401);
+    auth.removeUser('client');
+    assert.equal((await call('/api/state', {cookie: viewer, ...shared})).status, 401);
+
+    // Five wrong tries from one address lock it out for a while, even with the right password.
+    const from = {headers: {'X-Forwarded-For': '203.0.113.9'}};
+    for (let i = 0; i < 5; i++) assert.equal((await call('/api/login', {method: 'POST', body: {name: 'boss', password: 'nope-nope'}, ...from})).status, 401);
+    assert.equal((await call('/api/login', {method: 'POST', body: {name: 'boss', password: 'long-enough-1'}, ...from})).status, 429);
+    assert.equal((await call('/api/login', {method: 'POST', body: {name: 'boss', password: 'long-enough-1'}})).status, 200);
+  } finally { await m.close(); }
+});

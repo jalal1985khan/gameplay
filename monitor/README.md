@@ -64,8 +64,7 @@ went, result). **Download** saves them as a CSV.
 set to. **Set Bet 1 / Bet 2 in the game** fills your bet amount and Auto Cash Out target into the
 game's own boxes and then reads them back: if the game shows something else (its own limits, for
 example), the monitor says so. It refuses while Auto Play is on for that bet, while a bet is placed
-or in flight, after the stop-loss, and for more than the money you have left today. It prepares
-the bet only: you press Bet, Cash Out and Auto Play in the game yourself. If Auto Cash Out is off
+or in flight, after the stop-loss, and for more than the money you have left today. If Auto Cash Out is off
 and cannot be switched on from the monitor, switch it on in the game once and set the target again.
 
 **Game Auto Bet follows the game.** Where the game's bet panel can be read, tracking starts when
@@ -100,7 +99,9 @@ If the game window is closed, click Start live capture again.
 
 ## What it does and doesn't do
 
-- Reads the game's results list from the page, including the game frame. It never places bets, cashes out, switches Auto Play, or reads your password. It types in the game only when you press **Set Bet in the game**: the bet amount and the Auto Cash Out target.
+- Reads the game's results list from the page, including the game frame. It never reads your password. It types in the game only when you press **Set Bet in the game** (the bet amount and the Auto Cash Out target).
+- `POST /api/game/click` (`{slot, action: bet | cancel | cashout | autoplay, on}`) presses the game's Bet, Cancel, Cash Out or Auto Play button for one bet slot, on whatever game is open, real-money games included. It re-checks what the button shows just before pressing and presses nothing if that changed. Bet and Auto Play ON are refused after the stop-loss, during the cooldown after a loss, and for more than is left today.
+- When the stop-loss is reached the monitor switches the game's Auto Play off and cancels waiting bets by itself (`POST /api/game/cutoff` with `{enabled: false}` turns this off, `{force: true}` does it now). If two tries do not visibly switch Auto Play off it stops trying and leaves the alarm on.
 - Runs only on your computer: the page is served on 127.0.0.1 and refuses requests from other websites.
 - Does not predict rounds. Every round is random and independent; over time the game keeps about 3% of every bet.
 - Games drawn only on a canvas, with no text results list, can't be read.
@@ -111,3 +112,28 @@ If the game window is closed, click Start live capture again.
 ```bash
 npm test   # runs a fake game in a cross-origin frame and captures it in headless Chrome
 ```
+
+## Sharing it: accounts and view-only access
+
+By default the monitor has no sign-in and answers only on the computer it runs on. To let someone
+else open it (a client, say), create accounts and put a web server with HTTPS in front.
+
+```
+node users.js add yourname admin     # asks for a password; an admin can do everything
+node users.js add client viewer      # a viewer can look at everything and change nothing
+node users.js list
+node users.js remove client
+```
+
+As soon as one account exists, every page and every request needs a sign-in, on the computer
+itself too. A viewer sees the rounds, the analysis, the results and the picture of the game
+window; the capture, the tracked bets, the settings and everything that touches the game are
+refused for them by the server, not just hidden. Passwords are stored only as salted scrypt
+hashes in `data/users.json`. Five wrong tries from one address lock it out for ten minutes.
+Sign-ins last seven days and end when the monitor restarts.
+
+The monitor still listens on 127.0.0.1 only. Set `MONITOR_PUBLIC_HOST=monitor.example.com` and
+have nginx (or another web server) pass requests for that name to `http://127.0.0.1:4321` over
+HTTPS, with the `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` headers set and buffering off
+for `/events` and `/preview`. Requests for that name are refused until an account exists.
+

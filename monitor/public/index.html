@@ -97,6 +97,7 @@
   .glogin button{padding:8px 12px;font-size:13px}
   .glogin .gmsg{flex:1 1 100%}.glogin .gmsg:empty{display:none}
   body.viewer .glogin{display:none}
+  .recordonly{display:block;margin:8px auto 0;padding:4px 8px;background:none;border:0;color:var(--muted);font-size:13px;text-decoration:underline}
   .gamepanel .setmsg{margin-top:8px;font-size:13px}
   .gamepanel .press{display:flex;flex-wrap:wrap;align-items:center;gap:0 2px;margin-top:6px}
   .gamepanel .press span{margin:8px 8px 0 0}
@@ -302,8 +303,9 @@
       <div class="gamepanel" id="gamePanel" hidden></div>
       <div id="warnings"></div>
       <button type="button" id="betBtn" class="bet" hidden></button>
+      <button type="button" id="recordOnly" class="recordonly" hidden>I already placed this bet in the game: only record it</button>
       <div class="betmsg" id="betMsg"></div>
-      <p class="fine">The monitor places a bet or cashes out only when you press Place bet, Cancel bet or Cash out now above, and it cancels waiting bets and switches Auto Play off when your stop-loss is reached. This button only records a bet you already placed.</p>
+      <p class="fine" id="betFine"></p>
     </div>
     <div class="advice" id="advice"></div>
   </div>
@@ -490,7 +492,7 @@
   const RTP = 0.97;
   const stopShare = () => (state && state.settings ? state.settings.stopLossShare : 0.25);
   const stopWords = sh => sh >= 1 ? 'all of your money' : sh === 0.5 ? 'half of your money' : sh === 0.25 ? 'a quarter of your money' : `${Math.round(sh * 100)}% of your money`;
-  const money = n => `₹${Math.round(n).toLocaleString()}`;
+  const money = n => { const v = Math.round(n * 100) / 100; return `₹${v.toLocaleString(undefined, Number.isInteger(v) ? {} : {minimumFractionDigits: 2, maximumFractionDigits: 2})}`; };
   const signed = n => `${n < 0 ? '−' : '+'}${money(Math.abs(n))}`;
   const pct = p => p > 0 && p < 0.001 ? 'under 0.1%' : `${(p * 100).toFixed(p < 0.1 && p > 0 ? 1 : 0)}%`;
   let target = 2, stakeEdited = false, budgetSynced = false, mode = 'auto';
@@ -565,7 +567,7 @@
     if (!stakeEdited && budget > 0) $('stakeInput').value = Math.max(1, Math.floor(budget / 100));
     const stake = Number($('stakeInput').value);
     if (!(budget > 0) || !(target > 1) || !(stake > 0)) {
-      $('lines').innerHTML = ''; $('betLine').textContent = ''; $('betBtn').hidden = true;
+      $('lines').innerHTML = ''; $('betLine').textContent = ''; $('betBtn').hidden = true; $('recordOnly').hidden = true;
       $('advice').textContent = 'Enter the money you are ready to lose, a cash-out target above 1×, and a bet amount.'; return;
     }
     const p = Math.min(1, RTP / target), q = 1 - p;
@@ -625,7 +627,7 @@
       ? `Tracking follows the game. In the game's Auto tab set your bet and Auto Cash Out, then switch Auto Play on: tracking starts by itself with the game's own bet and target, and stops when you switch Auto Play off. An alarm sounds at your stop-loss.`
       : `In the game's Auto tab: set the bet to ${money(stake)}, turn on Auto Cash Out at ${target.toFixed(2)}, then turn on Auto Bet. Press the button below: every round is recorded, and an alarm sounds at your stop-loss.`;
     const msg = $('betMsg'), btn = $('betBtn');
-    if (!ses) { btn.hidden = true; msg.textContent = ''; return; }
+    if (!ses) { btn.hidden = true; $('recordOnly').hidden = true; msg.textContent = ''; return; }
     // What the game itself is set to, read from its page.
     const g = ses.game, gp = $('gamePanel');
     if (g && (g.slots.length || ses.balance !== null)) {
@@ -680,7 +682,15 @@
     }
     // Where the game's panel can be read, Auto Bet tracking follows the game: no button needed.
     btn.hidden = !((mode === 'autobet' ? ses.canAutoBet && !ses.canFollow : ses.canBet) && stake <= ses.left);
-    btn.textContent = mode === 'auto' ? `I placed ${money(stake)} with auto cash-out at ${target}×`
+    // With the game's panel on screen the button places the real bet; otherwise it only records one.
+    const wired = !!(g && g.slots.length) && mode !== 'autobet';
+    btn.dataset.wired = wired ? '1' : '';
+    $('recordOnly').hidden = btn.hidden || !wired;
+    $('betFine').textContent = wired
+      ? 'The green button sets the amount in the game, presses the game\'s Bet button for Bet 1 with real money, and records the bet here. Press it while the game is taking bets: pressed during a flight, the game keeps the bet for the next round and this record can be one round off. The monitor also cancels waiting bets and switches Auto Play off when your stop-loss is reached.'
+      : 'The game\'s bet panel is not on screen, so this button only records a bet you placed in the game yourself.';
+    btn.textContent = wired ? (mode === 'auto' ? `Place ${money(stake)} bet in the game, auto cash-out at ${target}×` : `Place ${money(stake)} bet in the game – I'll cash out myself`)
+      : mode === 'auto' ? `I placed ${money(stake)} with auto cash-out at ${target}×`
       : mode === 'manual' ? `I placed ${money(stake)} – I'll cash out myself`
       : `Game Auto Bet is on: ${money(stake)} at ${target}× – track every round`;
     msg.className = `betmsg ${cls}`;
@@ -919,15 +929,29 @@
     if (e.target.id === 'cashLost') await saveCashOut(null);
     if (e.target.id === 'newDay' && confirm('Start a new day? Today\'s bets are cleared from the tracker.')) await post('/api/session', {budget: Number($('budget').value)});
   });
+  const betError = text => { $('betMsg').className = 'betmsg stop'; $('betMsg').textContent = text; $('betMsg').dataset.html = ''; };
   $('betBtn').addEventListener('click', async () => {
-    $('betBtn').disabled = true;
+    const btn = $('betBtn'), stake = Number($('stakeInput').value);
+    btn.disabled = true;
     unlockSound();
     if (mode === 'autobet' && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
-    const r = mode === 'autobet'
-      ? await post('/api/autobet', {on: true, stake: Number($('stakeInput').value), target})
-      : await post('/api/bet', {stake: Number($('stakeInput').value), target, mode});
-    $('betBtn').disabled = false;
-    if (!r.ok) { $('betMsg').className = 'betmsg stop'; $('betMsg').textContent = r.error; }
+    let r;
+    if (mode === 'autobet') r = await post('/api/autobet', {on: true, stake, target});
+    else if (btn.dataset.wired) {
+      // The real bet: amount (and target) into the game, the game's Bet button, then the record.
+      r = await post('/api/game/set', mode === 'auto' ? {slot: 0, bet: stake, target} : {slot: 0, bet: stake});
+      if (r.ok) r = await post('/api/game/click', {slot: 0, action: 'bet'});
+      if (r.ok) {
+        r = await post('/api/bet', {stake, target, mode});
+        if (!r.ok) r = {ok: false, error: `The bet IS placed in the game, but it could not be recorded here: ${r.error}`};
+      } else r = {ok: false, error: `No bet was placed. ${r.error}`};
+    } else r = await post('/api/bet', {stake, target, mode});
+    btn.disabled = false;
+    if (!r.ok) betError(r.error);
+  });
+  $('recordOnly').addEventListener('click', async () => {
+    const r = await post('/api/bet', {stake: Number($('stakeInput').value), target, mode});
+    if (!r.ok) betError(r.error);
   });
   $('targets').addEventListener('click', e => {
     const b = e.target.closest('button[data-t]');

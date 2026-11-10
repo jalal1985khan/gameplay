@@ -369,9 +369,18 @@ test("follows the game's Auto Play: starts, uses the game's bet and target, skip
   await balance(500);
   await inGame(() => { document.querySelector('.autoPlayTagInput').disabled = true; });
   ses = (await until(state, s => s.session.autoBet && s.session.autoBet.target === null || s.session.game.slots[0].autoCashOut === false)).session;
+  await balance(508); // Cashed out by hand at 1.6× before the plane left: 500 + 5 × 1.6.
   ses = (await round(2)).session;
   assert.deepEqual([ses.bets, ses.all[0].manualExit, ses.all[0].result], [3, true, 'unknown']);
   assert.ok(ses.warnings.some(w => /Auto Cash Out is OFF/.test(w)));
+  // The balance tells how a bet without a target ended, once the next round is in.
+  await balance(503); // The game took the next ₹5 bet; nobody cashes this one out.
+  ses = (await round(1.5)).session;
+  assert.deepEqual([ses.all[1].result, ses.all[1].cashedAt, ses.all[1].profit], ['won', 1.6, 3]);
+  await balance(498); // Next bet taken: the one before was lost.
+  await balance(510.5); // This one is cashed out by hand at 2.5×.
+  ses = (await round(3)).session;
+  assert.deepEqual([ses.all[1].result, ses.all[1].profit, ses.all[0].result], ['lost', -5, 'unknown']);
   // Auto Play goes off in the game: tracking stops by itself.
   await inGame(() => { document.querySelector('.autoPlayButton').classList.remove('active'); document.querySelector('.autoPlayTagInput').disabled = false; });
   ses = (await until(state, s => !s.session.autoBet)).session;
@@ -379,6 +388,7 @@ test("follows the game's Auto Play: starts, uses the game's bet and target, skip
   const n = ses.all.length;
   ses = (await round(4)).session;
   assert.equal(ses.all.length, n);
+  assert.deepEqual([ses.all[0].result, ses.all[0].cashedAt, ses.all[0].profit], ['won', 2.5, 7.5], 'the last bet by hand is decided after Auto Play went off');
   await balance(1000);
 });
 
@@ -423,11 +433,11 @@ test('stop closes the game window; history is kept and saved', async () => {
   await post('/api/stop');
   const s = await state();
   assert.equal(s.capture.status, 'stopped');
-  assert.equal(s.count, 34);
+  assert.equal(s.count, 36);
   assert.equal(s.session.canBet, false, 'no bets while not capturing');
   // Every round is already in the site's log: one line each, written as it was captured.
   const log = fs.readFileSync(path.join(dir, 'data', 'rounds', `localhost_${gamePort}.ndjson`), 'utf8').trim().split('\n').map(l => JSON.parse(l));
-  assert.equal(log.length, 34);
+  assert.equal(log.length, 36);
   assert.deepEqual(log.slice(0, 3).map(r => r.v), [1.2, 3.45, 1]);
 });
 
@@ -436,7 +446,7 @@ test('analysis of the captured rounds: odds table, bands, checks and a replayed 
   const values = (await state()).recent.slice(0, 11).map(r => r.v).reverse();
   assert.equal(a.ok, true);
   assert.equal(a.rounds, 11);
-  assert.equal(a.total, 34);
+  assert.equal(a.total, 36);
   const hits = values.filter(v => v >= 2).length;
   assert.equal(a.base.hits, hits);
   assert.equal(a.ladder.find(r => r.target === 2).hits, hits);
@@ -450,7 +460,7 @@ test('analysis of the captured rounds: odds table, bands, checks and a replayed 
   assert.equal(a.backtest.points.at(-1).net, a.backtest.net);
   // Bad input falls back to safe values instead of failing.
   const b = await (await fetch(base + '/api/analysis?target=abc&size=-4&stake=0')).json();
-  assert.deepEqual([b.target, b.size, b.backtest.stake, b.rounds], [2, 0, 10, 34]);
+  assert.deepEqual([b.target, b.size, b.backtest.stake, b.rounds], [2, 0, 10, 36]);
   // The page and its chart script are served.
   assert.match(await (await fetch(base + '/analysis.js')).text(), /AnalysisUI/);
 });

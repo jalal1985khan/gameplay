@@ -246,7 +246,7 @@ function createMonitor({
     archiveDay();
     session = newSession(budget);
     session.balanceStart = panel ? panel.balance : null;
-    wasStopped = false; lastCutOff = null; lastCutOffAttemptAt = 0; cutOffFailures = 0;
+    wasStopped = false; lastCutOff = null; lastCutOffAttemptAt = 0; cutOffFailures = 0; openRound = null;
     followGame(); // Auto Play still on in the game: the new day is tracked from its first round.
     saveSession();
     broadcast();
@@ -272,6 +272,27 @@ function createMonitor({
     const earlier = total - fresh.length;
     seen += earlier;
     if (Number.isFinite(session.lastLossRound)) session.lastLossRound += earlier; // The pause counts live rounds only.
+    // Bets without a cash-out target from the round before: the balance tells how they ended.
+    // The lowest balance in a round is the one right after its bets were taken, so from one
+    // round's low to the next the balance moved by that round's payout minus the new bets.
+    const low = roundLow;
+    if (fresh.length || gap) roundLow = null;
+    const nowPlays = session.autoBet && session.autoBet.follow ? (panel ? panel.slots : []).filter(x => x.autoPlay === true && x.bet > 0) : [];
+    if (openRound && (fresh.length || gap)) {
+      const {low: before, bets, knownPayout} = openRound;
+      openRound = null;
+      if (!gap && fresh.length === 1 && low !== null && before !== null) {
+        const staked = nowPlays.reduce((n, x) => n + x.bet, 0);
+        const paid = Math.round((low - before + staked - knownPayout) * 100) / 100;
+        if (Math.abs(paid) < 0.005) {
+          for (const b of bets) Object.assign(b, {result: 'lost', profit: -b.stake, cashedAt: null});
+        } else if (bets.length === 1) {
+          // With two bets by hand the balance gives only their sum, so those stay undecided.
+          const [b] = bets, at = Math.round(paid / b.stake * 100) / 100;
+          if (at >= 1 && at <= b.round + 0.011) Object.assign(b, {result: 'won', cashedAt: at, profit: Math.round((paid - b.stake) * 100) / 100});
+        }
+      }
+    }
     const pending = session.bets.find(b => b.result === 'pending');
     if (pending && (gap || fresh.length)) {
       if (gap) pending.result = 'unknown'; // Its round may be one of the missed ones.
@@ -292,6 +313,8 @@ function createMonitor({
       // The most money seen since the last round: a bet above it cannot have been placed.
       let funds = fundsSeen === null ? Infinity : fundsSeen;
       const base = {mode: 'autobet', follow: true, at: Date.now()};
+      const byHand = [];
+      let knownPayout = 0;
       for (const {stake, target} of plays) {
         if (funds < stake) continue;
         funds -= stake;
@@ -299,12 +322,14 @@ function createMonitor({
         else fresh.forEach((round, i) => {
           // No Auto Cash Out: where the person cashed out is not known, so the bet has no result
           // here and the game balance carries the real outcome.
-          if (target === null) return session.bets.push({...base, stake, target, round, roundNo: seen + 1 + i, result: 'unknown', manualExit: true});
+          if (target === null) { byHand.push({...base, stake, target, round, roundNo: seen + 1 + i, result: 'unknown', manualExit: true}); return session.bets.push(byHand.at(-1)); }
           const won = round >= target;
+          if (won) knownPayout += stake * target;
           session.bets.push({...base, stake, target, round, roundNo: seen + 1 + i, cashedAt: won ? target : null,
             result: won ? 'won' : 'lost', profit: won ? Math.round(stake * (target - 1) * 100) / 100 : -stake});
         });
       }
+      if (byHand.length && !gap && fresh.length === 1) openRound = {low, bets: byHand, knownPayout};
     } else if (session.autoBet) {
       const {stake, target} = session.autoBet;
       if (gap) {
@@ -328,6 +353,8 @@ function createMonitor({
   // The highest game balance read since the last finished round (the bet is taken from the balance
   // before the round and the win is paid after it), or null when no balance was read.
   let fundsSeen = null;
+  // The lowest balance read since the last round, and the last round's bets still waiting for it.
+  let roundLow = null, openRound = null;
   let capture = {status: 'stopped', note: '', url: '', startedAt: 0, lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false};
   let context = null, stopping = false;
   // One lock for everything that types or clicks in the game, so two actions never overlap.
@@ -445,6 +472,7 @@ function createMonitor({
     })) : [];
     panel = {balance: num(p.balance), slots, at: Date.now()};
     if (panel.balance !== null) fundsSeen = Math.max(fundsSeen ?? 0, panel.balance);
+    if (panel.balance !== null) roundLow = roundLow === null ? panel.balance : Math.min(roundLow, panel.balance);
     if (followGame()) saveSession();
     // The day's starting balance: the first one seen after the day began.
     if (panel.balance !== null && (session.balanceStart === undefined || session.balanceStart === null)) {
@@ -564,7 +592,7 @@ function createMonitor({
   }
 
   async function stop(note = 'Capture stopped.') {
-    castPage = null; castSession = null; frame = null; gamePage = null; panel = null; fundsSeen = null;
+    castPage = null; castSession = null; frame = null; gamePage = null; panel = null; fundsSeen = null; roundLow = null; openRound = null;
     wasStopped = false; lastCutOffAttemptAt = 0; cutOffFailures = 0;
     const ctx = context;
     context = null;

@@ -292,6 +292,13 @@
       <label for="apStreak">6. After losses in a row</label>
       <div class="pair"><span>After</span><input id="apStreak" type="number" min="1" step="1" required aria-label="Losses in a row"><span>losses:</span><select id="apAction" aria-label="What to do"><option value="pause">pause</option><option value="stop">stop for today</option></select></div>
       <div class="pair" id="apPauseRow"><span>Pause for</span><input id="apPause" type="number" min="1" step="1" required aria-label="Rounds to pause"><span>rounds, then bet again</span></div>
+      <label for="apRecover">7. After a loss</label>
+      <select id="apRecover"><option value="0">Keep the same bet (lower risk)</option><option value="1">Raise the bet to win the loss back (higher risk)</option></select>
+      <div id="apRecoverRows">
+        <div class="pair"><span>While winning back, cash out at</span><input id="apRecoverTarget" type="number" min="1.1" step="0.01" required aria-label="Cash-out while winning back"><span>×</span></div>
+        <div class="pair"><span>Never bet more than ₹</span><input id="apMaxBet" type="number" min="1" step="1" required aria-label="Largest bet"></div>
+        <p class="fine">After a loss the next bet is sized so one win covers the open losses plus a normal win. A lower cash-out here wins more often but needs a bigger bet. A run of losses reaches your loss limit much sooner this way; it does not change the odds.</p>
+      </div>
       <p class="fine">These limits decide when the autopilot stops. They cannot make a round more likely to win: every round is random, and the game keeps about 3% of all bets over time.</p>
       <div class="warn" id="pilotError" hidden></div>
       <div class="dialog-actions">
@@ -638,13 +645,14 @@
     const a = p.settings, live = state.capture.status === 'live';
     const bet = a.betMode === 'percent' ? `${a.betValue}% of the game balance` : money(a.betValue);
     const after = a.lossAction === 'stop' ? 'stop for today' : `pause ${a.pauseRounds} round${a.pauseRounds > 1 ? 's' : ''}`;
-    const status = p.on ? (p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : `Running: ${money(p.stake)} a round, cash out at ${a.target}×.`)
+    const status = p.on ? (p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : p.phase === 'adjusting' ? `Changing the bet to ${money(p.stake)} at ${p.target}×…` : `Running: ${money(p.stake)} this round, cash out at ${p.target}×.${p.debt > 0 ? ` ${money(p.debt)} to win back.` : ''}`)
       : p.day.stopped ? `Done for today: ${p.day.stopped}. It can start again tomorrow.`
       : live ? 'Off. Nothing is bet until you start it.' : 'Off. Start live capture and open the game first.';
     const html = `<ul class="plist">
         <li>Each round: <b>${bet}</b>, cash out at <b>${a.target}×</b></li>
         <li>Stops for today at: <b>${money(a.lossLimit)} lost</b>, <b>${money(a.profitTarget)} won</b>, <b>${a.maxRounds} rounds</b> or <b>${a.maxMinutes} minutes</b></li>
         <li>After <b>${a.lossStreak}</b> losses in a row: <b>${after}</b></li>
+        <li>After a loss: ${a.recover ? `<b>raises the bet</b> to win it back, up to <b>${money(a.maxBet)}</b>, cashing out at <b>${a.recoverTarget}×</b>` : '<b>keeps the same bet</b>'}</li>
       </ul>
       <button type="button" id="pilotGo" class="bet${p.on ? ' halt' : ''}"${!p.on && (p.day.stopped || !live) ? ' disabled' : ''}>${p.on ? 'Stop autopilot' : 'Start autopilot'}</button>
       <div class="pstatus ${p.on ? (p.phase === 'paused' ? 'wait' : 'good') : p.day.stopped ? 'bad' : ''}">${status}</div>
@@ -668,7 +676,7 @@
     if (e.target.id === 'pilotGo') {
       const on = !(state && state.autopilot && state.autopilot.on);
       const a = state.autopilot.settings;
-      if (on && !confirm(`Start the autopilot? It will bet real money by itself: ${a.betMode === 'percent' ? `${a.betValue}% of the balance` : money(a.betValue)} a round, until ${money(a.lossLimit)} is lost, ${money(a.profitTarget)} is won, or ${a.maxRounds} rounds / ${a.maxMinutes} minutes are played.`)) return;
+      if (on && !confirm(`Start the autopilot? It will bet real money by itself: ${a.betMode === 'percent' ? `${a.betValue}% of the balance` : money(a.betValue)} a round, ${a.recover ? `raising the bet after a loss up to ${money(a.maxBet)}, ` : ''}until ${money(a.lossLimit)} is lost, ${money(a.profitTarget)} is won, or ${a.maxRounds} rounds / ${a.maxMinutes} minutes are played.`)) return;
       e.target.disabled = true;
       unlockSound();
       const r = await post('/api/autopilot', {on});
@@ -681,17 +689,21 @@
       $('apTarget').value = a.target; $('apRounds').value = a.maxRounds; $('apMinutes').value = a.maxMinutes;
       $('apStreak').value = a.lossStreak; $('apAction').value = a.lossAction; $('apPause').value = a.pauseRounds;
       $('apPauseRow').hidden = a.lossAction === 'stop';
+      $('apRecover').value = a.recover ? '1' : '0'; $('apRecoverTarget').value = a.recoverTarget; $('apMaxBet').value = a.maxBet;
+      $('apRecoverRows').hidden = !a.recover;
       $('pilotError').hidden = true;
       $('pilotDlg').showModal();
     }
   });
   $('apAction').addEventListener('change', () => { $('apPauseRow').hidden = $('apAction').value === 'stop'; });
+  $('apRecover').addEventListener('change', () => { $('apRecoverRows').hidden = $('apRecover').value !== '1'; });
   $('cancelPilot').addEventListener('click', () => $('pilotDlg').close());
   $('pilotForm').addEventListener('submit', async e => {
     e.preventDefault();
     const n = id => Number($(id).value);
     const r = await post('/api/autopilot/settings', {lossLimit: n('apLoss'), profitTarget: n('apProfit'), betMode: $('apBetMode').value, betValue: n('apBetValue'), target: n('apTarget'),
-      maxRounds: n('apRounds'), maxMinutes: n('apMinutes'), lossStreak: n('apStreak'), lossAction: $('apAction').value, pauseRounds: n('apPause') || 1});
+      maxRounds: n('apRounds'), maxMinutes: n('apMinutes'), lossStreak: n('apStreak'), lossAction: $('apAction').value, pauseRounds: n('apPause') || 1,
+      recover: $('apRecover').value === '1', recoverTarget: n('apRecoverTarget') || 2, maxBet: n('apMaxBet') || 1});
     if (!r.ok) { $('pilotError').textContent = r.error; $('pilotError').hidden = false; return; }
     pilotError = '';
     $('pilotDlg').close();

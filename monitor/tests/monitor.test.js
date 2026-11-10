@@ -828,6 +828,48 @@ test('autopilot: starts the game\'s Auto Play with the set bet, pauses after los
   await balance(1000);
 });
 
+test('autopilot, win back losses: the bet grows after a loss up to its cap and returns to normal after a win', async () => {
+  monitor._pilotNewDay();
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  const pilot = body => post('/api/autopilot', body).then(r => r.json());
+  const round = async v => {
+    const before = (await state()).count;
+    await gameFrame.evaluate(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
+    return until(state, s => s.count > before);
+  };
+  const balance = async v => {
+    await gameFrame.evaluate(x => { document.querySelector('.userBalanceMoney').textContent = '₹' + x.toFixed(2); }, v);
+    return until(state, s => s.session.balance === v);
+  };
+  // The game shows this bet with Auto Play on.
+  const betting = n => until(() => gameFrame.evaluate(() => [document.querySelector('.betSectionInput').value, document.querySelector('.autoPlayButton').classList.contains('active')]), v => v[0] === String(n) && v[1] === true);
+  await balance(1000);
+  await post('/api/session', {budget: 10000});
+  assert.match((await post('/api/autopilot/settings', {recoverTarget: 1}).then(r => r.json())).error, /cash-out while winning back/);
+  const saved = await post('/api/autopilot/settings', {lossLimit: 500, profitTarget: 500, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 10, lossAction: 'stop', recover: true, recoverTarget: 2, maxBet: 30}).then(r => r.json());
+  assert.equal(saved.ok, true, saved.error);
+  assert.equal((await pilot({on: true})).ok, true);
+  await betting(10);
+  await balance(990);
+  await round(1.5); // Lost ₹10: one win at 2× must bring back 10 and the usual 10.
+  await betting(20);
+  await balance(970);
+  await round(1.2); // Lost ₹20 more: 30 open would need ₹40, but the cap is ₹30.
+  await betting(30);
+  let st = await state();
+  assert.deepEqual([st.autopilot.debt, st.autopilot.stake, st.autopilot.day.net], [30, 30, -30]);
+  await balance(940);
+  await balance(1000);
+  await round(3); // Won ₹30: the open losses are covered, the bet is ₹10 again.
+  await betting(10);
+  st = await state();
+  assert.deepEqual([st.autopilot.debt, st.autopilot.stake, st.autopilot.day.net, st.autopilot.day.rounds], [0, 10, 0, 3]);
+  assert.ok(st.autopilot.log.some(l => /to win back: next bet ₹30/.test(l.text)));
+  assert.equal((await pilot({on: false})).ok, true);
+  await until(() => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active')), v => v === false);
+  await balance(1000);
+});
+
 test('presses nothing when the game button changes between the check and the press', async () => {
   await post('/api/start', {url: `http://localhost:${gamePort}/`});
   await until(state, s => s.capture.status === 'live' && s.session.game && s.session.game.slots.length > 0);

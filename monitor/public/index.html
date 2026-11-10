@@ -96,6 +96,7 @@
   .gamepanel .press{display:flex;flex-wrap:wrap;align-items:center;gap:0 2px;margin-top:6px}
   .gamepanel .press span{margin:8px 8px 0 0}
   .gamepanel .press .go{background:#1f5f38;border-color:#2f8f55}
+  .gamepanel .press .stop{background:#6b2424;border-color:#a84040}
   .gamepanel .press .out{background:#6b4a14;border-color:#a8782a}
   .gamepanel .setmsg:empty{display:none}
   .gamepanel button{margin-right:6px;margin-top:8px;padding:7px 12px;font-size:13px;background:#252c3b;color:var(--text);border:1px solid var(--border)}
@@ -621,8 +622,8 @@
       const html = `<div>In the game: balance <b>${ses.balance === null ? '?' : money(ses.balance)}</b></div>${slotsHtml}` +
         (g.slots.length ? '<button type="button" id="useGame">Use the game\'s bet and target</button>' : '') +
         g.slots.map((x, i) => `<button type="button" data-set="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Set Bet ${i + 1} in the game: ${money(stake)}, Auto Cash Out ${target}×</button>`).join('') +
-        g.slots.map((x, i) => `<div class="press"><span>Bet ${i + 1} in the game:</span><button type="button" class="go" data-press="bet" data-slot="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Place bet${x.bet ? ` ${money(x.bet)}` : ''}</button><button type="button" data-press="cancel" data-slot="${i}">Cancel bet</button><button type="button" class="out" data-press="cashout" data-slot="${i}">Cash out now</button></div>`).join('') +
-        (g.slots.length ? '<div class="setmsg" id="setMsg"></div><p class="fine">The Set buttons fill in the amount and the Auto Cash Out target. Place bet, Cancel bet and Cash out now press the game\'s own button for that bet, with real money, the moment you click.</p>' : '');
+        g.slots.map((x, i) => `<div class="press"><span>Bet ${i + 1} in the game:</span><button type="button" class="go" data-press="bet" data-slot="${i}"${x.autoPlay ? ' disabled title="Auto Play is on for this bet"' : ''}>Place bet${x.bet ? ` ${money(x.bet)}` : ''}</button><button type="button" data-press="cancel" data-slot="${i}">Cancel bet</button><button type="button" class="out" data-press="cashout" data-slot="${i}">Cash out now</button>${x.autoPlay === null ? '' : `<button type="button" class="${x.autoPlay ? 'stop' : ''}" data-press="autoplay" data-on="${x.autoPlay ? 0 : 1}" data-slot="${i}">${x.autoPlay ? 'Stop Auto Play' : 'Start Auto Play'}</button>`}</div>`).join('') +
+        (g.slots.length ? '<div class="setmsg" id="setMsg"></div><p class="fine">The Set buttons fill in the amount and the Auto Cash Out target. Place bet, Cancel bet and Cash out now press the game\'s own button for that bet, with real money, the moment you click. Start Auto Play makes the game bet every round by itself; Stop Auto Play ends that.</p>' : '');
       if (gp.dataset.html !== html) { gp.innerHTML = html; gp.dataset.html = html; showSetNote(); }
       gp.hidden = false;
     } else gp.hidden = true;
@@ -859,12 +860,14 @@
     const pressBtn = e.target.closest('button[data-press]');
     if (pressBtn) {
       const slot = Number(pressBtn.dataset.slot), action = pressBtn.dataset.press;
-      const name = {bet: 'Bet', cancel: 'Cancel', cashout: 'Cash Out'}[action];
+      const name = {bet: 'Bet', cancel: 'Cancel', cashout: 'Cash Out', autoplay: 'Auto Play'}[action];
+      const on = action === 'autoplay' ? pressBtn.dataset.on === '1' : undefined;
       setNote = {ok: true, text: `Pressing ${name} in the game…`}; showSetNote();
-      const r = await post('/api/game/click', {slot, action});
+      const r = await post('/api/game/click', {slot, action, on});
       const at = clock(Date.now());
       setNote = !r.ok ? {ok: false, text: r.error || `${name} was not pressed.`}
         : action === 'bet' ? {ok: true, text: `Bet ${slot + 1} placed at ${at}${r.shown && r.shown.bet ? `: ${money(r.shown.bet)}` : ''}.`}
+        : action === 'autoplay' ? {ok: true, text: on ? `Auto Play is ON for Bet ${slot + 1} since ${at}: the game now bets every round until you stop it or your stop-loss is reached.` : `Auto Play is OFF for Bet ${slot + 1} since ${at}. A bet already in this round still plays out.`}
         : action === 'cancel' ? {ok: true, text: `Bet ${slot + 1} cancelled at ${at}.`}
         : {ok: true, text: `Bet ${slot + 1} cashed out at ${at}. The game balance shows what it paid.`};
       showSetNote();

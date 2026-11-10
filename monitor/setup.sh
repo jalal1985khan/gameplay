@@ -97,6 +97,11 @@ if [ "$(node_major)" -lt "$NODE_MAJOR" ]; then
   apt-get install -y -qq nodejs >/dev/null
 fi
 [ "$(node_major)" -ge "$NODE_MAJOR" ] || die "Node.js $NODE_MAJOR or newer could not be installed (found $(node -v 2>/dev/null || echo none))."
+# Ubuntu's own nodejs package comes without npm; it is a separate package there.
+if ! command -v npm >/dev/null 2>&1; then
+  apt-get install -y -qq npm >/dev/null || die "npm could not be installed. Try:  apt-get install -y npm"
+fi
+command -v npm >/dev/null 2>&1 || die "npm is still missing after installing it."
 NODE_BIN="$(command -v node)"
 ok "Node.js $(node -v) at $NODE_BIN"
 

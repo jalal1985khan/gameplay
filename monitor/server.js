@@ -33,6 +33,9 @@ const KEEP_RUNNING_ARGS = [
   '--disable-renderer-backgrounding',
   '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
 ];
+// A server has no graphics card, and Chrome no longer draws WebGL games in software unless told
+// to; without this such a game stays on its loading screen.
+const SERVER_GRAPHICS_ARGS = process.platform === 'linux' ? ['--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] : [];
 const PAGE = path.join(__dirname, 'public', 'index.html');
 const LOGIN_PAGE = path.join(__dirname, 'public', 'login.html');
 
@@ -496,7 +499,7 @@ function createMonitor({
   async function openBrowser() {
     if (launch) return launch();
     const {chromium} = require('playwright-core');
-    const options = {headless, viewport: null, args: ['--no-first-run', '--no-default-browser-check', ...KEEP_RUNNING_ARGS]};
+    const options = {headless, viewport: null, args: ['--no-first-run', '--no-default-browser-check', ...KEEP_RUNNING_ARGS, ...SERVER_GRAPHICS_ARGS]};
     const errors = [];
     // The person's own installed browser, so nothing extra has to be downloaded.
     for (const channel of ['chrome', 'msedge', undefined]) {
@@ -1149,8 +1152,10 @@ function createMonitor({
   const tunnels = new Set();
   server.on('upgrade', (req, socket, head) => {
     const {known, shared, authOn, user, originOk} = identify(req);
+    // noVNC builds this address differently from version to version: /vnc/websockify, or the
+    // same resolved against its own page (/vnc/vnc/websockify), or from the root (/websockify).
     const pathname = String(req.url).split('?')[0];
-    if (!gameWindowPort || !known || (shared && !authOn) || !user || user.role !== 'admin' || !originOk || pathname !== '/vnc/websockify') {
+    if (!gameWindowPort || !known || (shared && !authOn) || !user || user.role !== 'admin' || !originOk || !/^\/(vnc\/){0,2}websockify$/.test(pathname)) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }

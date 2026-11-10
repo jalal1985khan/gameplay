@@ -282,7 +282,7 @@ server {
     proxy_read_timeout 1h;
   }
   # The game window's live connection (a WebSocket), for a signed-in admin.
-  location = /vnc/websockify {
+  location ~ ^/(vnc/)*websockify\$ {
     proxy_pass http://127.0.0.1:$PORT;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;

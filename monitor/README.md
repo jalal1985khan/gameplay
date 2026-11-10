@@ -137,3 +137,19 @@ have nginx (or another web server) pass requests for that name to `http://127.0.
 HTTPS, with the `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` headers set and buffering off
 for `/events` and `/preview`. Requests for that name are refused until an account exists.
 
+
+## Running it on a server
+
+`setup.sh` sets up an Ubuntu server in one go, from this folder: it checks memory and disk,
+installs Node.js 22, Google Chrome, a virtual screen, VNC and a browser VNC viewer, creates the
+`monitor` user and four services that start by themselves after a reboot, and asks for the
+sign-in accounts. It can be run again at any time, for example after updating the code.
+
+```
+sudo bash setup.sh
+sudo bash setup.sh --domain monitor.example.com --email you@example.com   # also publish with HTTPS
+```
+
+Without `--domain` nothing is opened to the internet: you reach the monitor and the game window
+through an SSH tunnel, which the script prints at the end. The folder must not be inside a web
+server's public folder (such as `/var/www`); the script refuses to continue there.

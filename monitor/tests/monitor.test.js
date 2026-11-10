@@ -560,11 +560,11 @@ const wireButtons = gameFrame => gameFrame.evaluate(() => {
       if (document.getElementById('opts')) return;
       const box = document.createElement('div');
       box.id = 'opts';
-      box.innerHTML = '<div><span>Auto Play Options</span></div><div><button>10</button><button>40</button></div><div><button>Reset</button><button id="go">Start</button></div>';
+      box.innerHTML = '<div><span>Auto Play Options</span></div><div><button>10</button><button>40</button></div><div><button><span>reset</span></button><button id="go"><span>start</span></button></div>';
       document.body.append(box);
       box.querySelectorAll('button').forEach(b => { b.onclick = () => {
         if (b.id === 'go') { playBtn.classList.add('active'); playBtn.textContent = 'stop'; box.remove(); }
-        else if (b.textContent !== 'Reset') window.picked = b.textContent;
+        else if (b.textContent !== 'reset') window.picked = b.textContent;
       }; });
       return;
     }

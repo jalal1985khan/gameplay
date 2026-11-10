@@ -886,7 +886,9 @@ function createMonitor({
       let targetLocator, done, mismatchError, wantOn = false;
       // Some games answer the Auto Play button with an options box (number of rounds, Start).
       const optionsTitle = frame.getByText(/^\s*auto ?play options\s*$/i).first();
-      const optionsOpen = () => optionsTitle.isVisible().catch(() => false);
+      // pokgaming's Avi: .autoPlayPopup holds the round buttons and a lower-case "start" button.
+      const optionsPopup = frame.locator('.autoPlayPopup').first();
+      const optionsOpen = async () => await optionsPopup.isVisible().catch(() => false) || await optionsTitle.isVisible().catch(() => false);
       if (kind === 'autoplay') {
         if (!before.hasAutoPlay) return fail('The Auto Play button was not found on this slot.');
         wantOn = on !== undefined ? on : !before.autoPlay;
@@ -951,13 +953,14 @@ function createMonitor({
           if (!box) await new Promise(r => setTimeout(r, 80));
         }
         if (box) {
-          const panelBox = optionsTitle.locator('xpath=ancestor::*[.//*[normalize-space(text())="Start"]][1]');
+          const panelBox = await optionsPopup.count().catch(() => 0) ? optionsPopup
+            : optionsTitle.locator('xpath=ancestor::*[.//*[translate(normalize-space(text()),"START","start")="start"]][1]');
           if (rounds) {
             const pick = panelBox.getByText(String(rounds), {exact: true}).first();
             if (!await pick.count().catch(() => 0)) return fail(`The game does not offer ${rounds} rounds in its Auto Play options. Nothing was started; the options box is open in the game window.`);
             await pick.click({timeout: 1500});
           }
-          await panelBox.getByText('Start', {exact: true}).last().click({timeout: 1500});
+          await panelBox.getByText(/^\s*start\s*$/i).last().click({timeout: 1500});
           wait = 2500;
           mismatchError = () => "Start was pressed in the game's Auto Play options, but Auto Play does not show as ON yet. Check the game window.";
         }

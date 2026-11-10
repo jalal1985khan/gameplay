@@ -65,7 +65,7 @@ function createMonitor({
   try { settings = {...settings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8'))}; } catch {}
   // The autopilot's limits (set by the person on its settings screen) and its totals for the day.
   const pilotFile = path.join(dataDir, 'autopilot.json');
-  const pilotCfg = {settings: {lossLimit: 250, profitTarget: 200, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 3, lossAction: 'pause', pauseRounds: 5, recover: false, recoverTarget: 2, maxBet: 100}, day: null};
+  const pilotCfg = {settings: {lossLimit: 250, profitTarget: 200, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 3, lossAction: 'pause', pauseRounds: 5, recover: false, recoverTarget: 2, maxBet: 100, plan: 'single', minTarget: 1.5, maxTarget: 7, riderBet: 5}, day: null};
   try { const saved = JSON.parse(fs.readFileSync(pilotFile, 'utf8')); pilotCfg.settings = {...pilotCfg.settings, ...(saved.settings || {})}; pilotCfg.day = saved.day || null; } catch {}
   function saveSettings(input = {}) {
     const pause = Number(input.pauseRounds), share = Number(input.stopLossShare);
@@ -1091,31 +1091,56 @@ function createMonitor({
     };
     if (input.betMode !== undefined) { if (!['fixed', 'percent'].includes(input.betMode)) return {ok: false, error: 'Choose a fixed bet or a share of the balance.'}; a.betMode = input.betMode; }
     if (input.recover !== undefined) { if (typeof input.recover !== 'boolean') return {ok: false, error: 'Set "recover" to true or false.'}; a.recover = input.recover; }
+    if (input.plan !== undefined) { if (!['single', 'split', 'range'].includes(input.plan)) return {ok: false, error: 'Choose one of the three ways to bet.'}; a.plan = input.plan; }
     if (input.lossAction !== undefined) { if (!['pause', 'stop'].includes(input.lossAction)) return {ok: false, error: 'Choose pause or stop after losses in a row.'}; a.lossAction = input.lossAction; }
     const error = num('lossLimit', 1, 10000000, false, 'The daily loss limit') || num('profitTarget', 1, 10000000, false, 'The profit target')
       || num('betValue', 0.1, 1000000, false, 'The bet') || num('target', 1.01, 1000, false, 'The cash-out target')
       || num('maxRounds', 1, 5000, true, 'The round limit') || num('maxMinutes', 1, 1440, true, 'The time limit')
       || num('lossStreak', 1, 50, true, 'Losses in a row') || num('pauseRounds', 1, 100, true, 'The pause')
-      || num('recoverTarget', 1.1, 1000, false, 'The cash-out while winning back') || num('maxBet', 1, 1000000, false, 'The largest bet');
+      || num('recoverTarget', 1.1, 1000, false, 'The cash-out while winning back') || num('maxBet', 1, 1000000, false, 'The largest bet')
+      || num('minTarget', 1.01, 1000, false, 'The lowest cash-out') || num('maxTarget', 1.02, 1000, false, 'The highest cash-out') || num('riderBet', 0.1, 1000000, false, 'The second bet');
+    if (!error && a.plan !== 'single' && !(a.maxTarget > a.minTarget)) return {ok: false, error: 'The highest cash-out must be above the lowest.'};
     if (error) return {ok: false, error};
     if (a.betMode === 'percent' && a.betValue > 10) return {ok: false, error: 'A bet of more than 10% of the balance is not allowed.'};
     if (pilot.on) return {ok: false, error: 'Stop the autopilot before changing its settings.'};
     a.target = round2(a.target);
     a.recoverTarget = round2(a.recoverTarget);
+    a.minTarget = round2(a.minTarget);
+    a.maxTarget = round2(a.maxTarget);
     pilotCfg.settings = a;
     savePilot();
     broadcast();
     return {ok: true, settings: a};
   }
-  // Sets the bet and target in the game and starts the game's Auto Play for bet 1.
+  // The bets of one round. Split plan: a secure part on bet 1 at the lowest cash-out and a rider
+  // on bet 2 at the highest. Otherwise one bet on bet 1.
+  function pilotLegs() {
+    const a = pilotCfg.settings;
+    return a.plan === 'split'
+      ? [{slot: 0, stake: pilot.stake, target: a.minTarget}, {slot: 1, stake: round2(a.riderBet), target: a.maxTarget}]
+      : [{slot: 0, stake: pilot.stake, target: pilot.target}];
+  }
+  // Sets each bet and its target in the game and starts the game's Auto Play for it. A bet whose
+  // Auto Play is already on is left as it is.
   async function pilotEngage() {
     const a = pilotCfg.settings, left = Math.max(1, a.maxRounds - pilotDay().rounds);
-    let r = await setGame({slot: 0, bet: pilot.stake, target: pilot.target});
-    if (!r.ok) return r;
-    pilot.engageBalance = panel ? panel.balance : null;
-    pilot.watchLow = pilot.engageBalance;
-    pilot.firstCheck = true;
-    r = await clickGame({slot: 0, action: 'autoplay', on: true, rounds: ROUND_CHOICES.find(n => n >= left) || ROUND_CHOICES.at(-1)});
+    const rounds = ROUND_CHOICES.find(n => n >= left) || ROUND_CHOICES.at(-1);
+    let r = {ok: true}, first = true;
+    for (const leg of pilotLegs()) {
+      const now = panel && panel.slots[leg.slot];
+      if (!now) return {ok: false, error: `Bet ${leg.slot + 1} is not on screen in the game.`};
+      if (now.autoPlay === true) continue;
+      r = await setGame({slot: leg.slot, bet: leg.stake, target: leg.target});
+      if (!r.ok) return r;
+      if (first) {
+        first = false;
+        pilot.engageBalance = panel ? panel.balance : null;
+        pilot.watchLow = pilot.engageBalance;
+        pilot.firstCheck = true;
+      }
+      r = await clickGame({slot: leg.slot, action: 'autoplay', on: true, rounds});
+      if (!r.ok) return r;
+    }
     pilot.engagedAt = Date.now();
     return r;
   }
@@ -1146,11 +1171,15 @@ function createMonitor({
     if (panel.slots.some(x => x.autoPlay === true)) return fail('Auto Play is already on in the game. Stop it first.');
     if (sessionState().stopped) return fail('Stop-loss reached. You are done for today.');
     const stake = a.betMode === 'percent' ? Math.max(1, Math.floor(balance * a.betValue / 100)) : round2(a.betValue);
-    if (stake > balance) return fail(`The bet (₹${stake}) is more than the game balance (₹${balance}).`);
-    if (day.net - stake < -a.lossLimit) return fail(`One more bet of ₹${stake} could pass today's loss limit of ₹${a.lossLimit}.`);
+    const split = a.plan === 'split', total = round2(stake + (split ? a.riderBet : 0));
+    if (split && panel.slots.length < 2) return fail('The split plan needs both bet panels of the game on screen.');
+    if (total > balance) return fail(`The bet (₹${total}) is more than the game balance (₹${balance}).`);
+    if (day.net - total < -a.lossLimit) return fail(`One more round of ₹${total} could pass today's loss limit of ₹${a.lossLimit}.`);
     if (day.rounds >= a.maxRounds) return fail(`Today's limit of ${a.maxRounds} rounds is used up.`);
-    pilot = {...pilot, on: true, phase: 'running', startedAt: Date.now(), stake, base: stake, target: a.target, debt: 0, streak: 0, lastTick: Date.now(), fails: 0, needCut: false};
-    pilotSay(`Autopilot on: ₹${stake} a round, cash out at ${a.target}×.`);
+    pilot = {...pilot, on: true, phase: 'running', startedAt: Date.now(), stake, base: stake, target: a.plan === 'single' ? a.target : a.minTarget, debt: 0, streak: 0, lastTick: Date.now(), fails: 0, needCut: false};
+    pilotSay(split ? `Autopilot on: ₹${stake} cashing out at ${a.minTarget}× and ₹${round2(a.riderBet)} riding to ${a.maxTarget}×, every round.`
+      : a.plan === 'range' ? `Autopilot on: ₹${stake} a round, cash out from ${a.minTarget}× up to ${a.maxTarget}× after losses.`
+      : `Autopilot on: ₹${stake} a round, cash out at ${a.target}×.`);
     const r = await pilotEngage();
     if (!r.ok) { await pilotStop(`it could not start the game's Auto Play (${r.error})`, false); return fail(r.error); }
     broadcast();
@@ -1172,46 +1201,56 @@ function createMonitor({
       const a = pilotCfg.settings, day = pilotDay(), now = Date.now();
       if (pilot.phase === 'running') day.ms += now - pilot.lastTick;
       pilot.lastTick = now;
-      // Count the results that came in since the last look.
-      for (const b of [...session.bets]) {
+      // Count the results that came in since the last look, round by round (a split round has two bets).
+      const byRound = new Map();
+      for (const b of session.bets) {
         if (!b.follow || b.piloted || b.at < pilot.startedAt || !(b.result === 'won' || b.result === 'lost')) continue;
+        byRound.set(b.roundNo, [...(byRound.get(b.roundNo) || []), b]);
+      }
+      for (const group of byRound.values()) {
         if (pilot.firstCheck) {
-          // Started mid-flight: the balance never dropped by the bet, so no bet rode on this round.
+          // Started mid-flight: the balance never dropped by a bet, so no bet rode on this round.
           pilot.firstCheck = false;
-          if (pilot.engageBalance !== null && pilot.watchLow !== null && pilot.watchLow > pilot.engageBalance - pilot.stake + 0.005) {
-            session.bets.splice(session.bets.indexOf(b), 1);
+          if (pilot.engageBalance !== null && pilot.watchLow !== null && pilot.watchLow > pilot.engageBalance - Math.min(...group.map(b => b.stake)) + 0.005) {
+            for (const b of group) session.bets.splice(session.bets.indexOf(b), 1);
             saveSession();
             changed = true;
             continue;
           }
         }
-        b.piloted = true;
-        day.net = round2(day.net + b.profit);
+        const net = round2(group.reduce((n, b) => n + b.profit, 0));
+        for (const b of group) b.piloted = true;
+        day.net = round2(day.net + net);
         day.rounds++;
-        pilot.streak = b.result === 'lost' ? pilot.streak + 1 : 0;
-        // What is still to be won back: losses add to it, a win pays it down.
-        pilot.debt = round2(b.result === 'lost' ? pilot.debt + b.stake : Math.max(0, pilot.debt - b.profit));
+        pilot.streak = net < 0 ? pilot.streak + 1 : 0;
+        // What is still to be won back: a losing round adds to it, a winning round pays it down.
+        pilot.debt = round2(Math.max(0, pilot.debt - net));
         changed = true;
       }
-      // The next bet. With "win back losses" on and a loss still open, the bet is sized so that one
-      // win at the recovery target covers the open losses plus a normal win; never above the
-      // largest bet allowed, the balance, or what is left before the loss limit.
-      let nextStake = pilot.base, nextTarget = a.target;
-      if (a.recover && pilot.debt > 0) {
+      // The next round. Nothing here looks at past rounds to guess the next one: only at what
+      // was lost. "range": the same bet, with the cash-out raised just enough for one win to
+      // cover the open losses, between the lowest and highest set. "single" with win-back: a
+      // bigger bet instead, never above the largest bet, the balance, or the room to the loss limit.
+      let nextStake = pilot.base, nextTarget = a.plan === 'single' ? a.target : a.minTarget;
+      if (a.plan === 'range' && pilot.debt > 0) {
+        const need = 1 + (pilot.debt + pilot.base * (a.minTarget - 1)) / pilot.base;
+        nextTarget = Math.min(a.maxTarget, Math.max(a.minTarget, Math.ceil(need * 100 - 1e-6) / 100));
+      } else if (a.plan === 'single' && a.recover && pilot.debt > 0) {
         nextTarget = a.recoverTarget;
         const room = Math.floor(a.lossLimit + day.net), funds = panel && panel.balance !== null ? Math.floor(panel.balance) : Infinity;
         nextStake = Math.max(pilot.base, Math.min(Math.ceil((pilot.debt + pilot.base * (a.target - 1)) / (nextTarget - 1)), a.maxBet, room, funds));
       }
+      const roundCost = round2(pilot.base + (a.plan === 'split' ? a.riderBet : 0));
       let stop = '';
       if (day.net <= -a.lossLimit) stop = `the loss limit of ₹${a.lossLimit} was reached`;
-      else if (day.net - Math.min(pilot.base, nextStake) < -a.lossLimit) stop = `one more bet could pass the loss limit of ₹${a.lossLimit}`;
+      else if (day.net - roundCost < -a.lossLimit) stop = `one more bet could pass the loss limit of ₹${a.lossLimit}`;
       else if (day.net >= a.profitTarget) stop = `the profit target of ₹${a.profitTarget} was reached`;
       else if (day.rounds >= a.maxRounds) stop = `${a.maxRounds} rounds were played`;
       else if (day.ms >= a.maxMinutes * 60000) stop = `${a.maxMinutes} minutes were played`;
       else if (sessionState().stopped) stop = "the day's stop-loss was reached";
       else if (pilot.streak >= a.lossStreak && a.lossAction === 'stop') stop = `${pilot.streak} losses in a row`;
       if (stop) { await pilotStop(stop, true); return; }
-      const playing = !!(panel && panel.slots[0] && panel.slots[0].autoPlay === true);
+      const playing = pilotLegs().every(l => !!(panel && panel.slots[l.slot] && panel.slots[l.slot].autoPlay === true));
       if (pilot.phase === 'running' && pilot.streak >= a.lossStreak) {
         pilot.phase = 'paused';
         pilot.stake = nextStake; // Used when the pause is over.
@@ -1224,7 +1263,7 @@ function createMonitor({
       } else if (pilot.phase === 'running' && changed && (nextStake !== pilot.stake || nextTarget !== pilot.target)) {
         // A different bet or target: Auto Play goes off, the waiting bet is cancelled, and it
         // starts again with the new values.
-        pilotSay(pilot.debt > 0 ? `₹${pilot.debt} to win back: next bet ₹${nextStake} at ${nextTarget}×.` : `Losses won back: bet is ₹${nextStake} at ${nextTarget}× again.`);
+        pilotSay(pilot.debt > 0 ? `₹${pilot.debt} to win back: next bet ₹${nextStake}, cash out at ${nextTarget}×.` : `Losses won back: ₹${nextStake} at ${nextTarget}× again.`);
         pilot.stake = nextStake;
         pilot.target = nextTarget;
         pilot.phase = 'adjusting';

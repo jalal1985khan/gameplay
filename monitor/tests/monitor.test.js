@@ -864,9 +864,84 @@ test('autopilot, win back losses: the bet grows after a loss up to its cap and r
   await betting(10);
   st = await state();
   assert.deepEqual([st.autopilot.debt, st.autopilot.stake, st.autopilot.day.net, st.autopilot.day.rounds], [0, 10, 0, 3]);
-  assert.ok(st.autopilot.log.some(l => /to win back: next bet ₹30/.test(l.text)));
+  assert.ok(st.autopilot.log.some(l => /to win back: next bet ₹30,/.test(l.text)));
   assert.equal((await pilot({on: false})).ok, true);
   await until(() => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active')), v => v === false);
+  await balance(1000);
+});
+
+test('autopilot plans: cash-out raised after losses within a range; and a split of a secure bet and a rider', async () => {
+  const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  const pilot = body => post('/api/autopilot', body).then(r => r.json());
+  const setup = body => post('/api/autopilot/settings', body).then(r => r.json());
+  const round = async v => {
+    const before = (await state()).count;
+    await gameFrame.evaluate(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
+    return until(state, s => s.count > before);
+  };
+  const balance = async v => {
+    await gameFrame.evaluate(x => { document.querySelector('.userBalanceMoney').textContent = '₹' + x.toFixed(2); }, v);
+    return until(state, s => s.session.balance === v);
+  };
+  // What each bet panel of the game shows: [amount, cash-out, Auto Play on].
+  const shown = () => gameFrame.evaluate(() => [...document.querySelectorAll('.betSectionBlock')].map(b => [b.querySelector('.betSectionInput').value, b.querySelector('.autoPlayTagInput').value, b.querySelector('.autoPlayButton').classList.contains('active')]));
+  const shows = want => until(shown, v => JSON.stringify(v) === JSON.stringify(want));
+  const common = {lossLimit: 500, profitTarget: 500, betMode: 'fixed', betValue: 10, maxRounds: 50, maxMinutes: 60, lossStreak: 10, lossAction: 'stop', recover: false};
+
+  // Range: the bet stays ₹10; the cash-out moves between 1.5× and 3× with the open losses.
+  monitor._pilotNewDay();
+  await balance(1000);
+  await post('/api/session', {budget: 10000});
+  assert.match((await setup({plan: 'range', minTarget: 3, maxTarget: 2})).error, /highest cash-out must be above/);
+  assert.equal((await setup({...common, plan: 'range', minTarget: 1.5, maxTarget: 3})).ok, true);
+  assert.equal((await pilot({on: true})).ok, true);
+  await shows([['10', '1.5', true]]);
+  await balance(990);
+  await round(1.2); // ₹10 lost: 2.5× brings back the 10 and the usual 5.
+  await shows([['10', '2.5', true]]);
+  await balance(980);
+  await round(1.3); // ₹20 open would need 3.5×: held at the highest, 3×.
+  await shows([['10', '3', true]]);
+  await balance(970);
+  await balance(1000);
+  await round(4); // Won ₹20 at 3×: nothing open, back to 1.5×.
+  await shows([['10', '1.5', true]]);
+  let st = await state();
+  assert.deepEqual([st.autopilot.debt, st.autopilot.day.net, st.autopilot.day.rounds], [0, 0, 3]);
+  assert.equal((await pilot({on: false})).ok, true);
+  await shows([['10', '1.5', false]]);
+
+  // Split: the game gets a second bet panel; ₹10 leaves at 1.5× and ₹5 rides to 7×.
+  monitor._pilotNewDay();
+  await gameFrame.evaluate(() => {
+    const first = document.querySelector('.betSectionBlock'), b = first.cloneNode(true);
+    b.id = 'second';
+    first.after(b);
+    b.querySelector('.autoPlayButton').addEventListener('click', e => { const on = e.currentTarget.classList.toggle('active'); e.currentTarget.textContent = on ? 'stop' : 'auto play'; });
+    b.querySelector('.switcher').addEventListener('click', () => { const t = b.querySelector('.autoPlayTagInput'); t.disabled = !t.disabled; });
+    b.querySelector('.betButton').className = 'betButton start';
+  });
+  await until(state, s => s.session.game.slots.length === 2);
+  await balance(1000);
+  assert.equal((await setup({...common, plan: 'split', minTarget: 1.5, maxTarget: 7, riderBet: 5})).ok, true);
+  const on = await pilot({on: true});
+  assert.equal(on.ok, true, on.error);
+  await shows([['10', '1.5', true], ['5', '7', true]]);
+  await balance(985);
+  await round(2); // The secure bet wins ₹5, the rider loses ₹5.
+  st = await until(state, s => s.autopilot.day.rounds === 1);
+  assert.deepEqual([st.autopilot.day.net, st.session.all[0].stake + st.session.all[1].stake], [0, 15]);
+  await round(1.2); // Both lose.
+  st = await until(state, s => s.autopilot.day.rounds === 2);
+  assert.equal(st.autopilot.day.net, -15);
+  await round(8); // Both win: +5 and +30.
+  st = await until(state, s => s.autopilot.day.rounds === 3);
+  assert.equal(st.autopilot.day.net, 20);
+  assert.equal((await pilot({on: false})).ok, true);
+  await shows([['10', '1.5', false], ['5', '7', false]]);
+  await gameFrame.evaluate(() => document.getElementById('second').remove());
+  await until(state, s => s.session.game.slots.length === 1);
+  await setup({plan: 'single'});
   await balance(1000);
 });
 

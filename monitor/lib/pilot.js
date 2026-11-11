@@ -23,7 +23,9 @@ function planNext(a, base, debt, room = Infinity, funds = Infinity) {
 // Why the day ends now, or null. d: {net, rounds, ms, streak, peak, roundCost}.
 function stopReason(a, d) {
   if (d.net <= -a.lossLimit) return {kind: 'loss', text: `the loss limit of ₹${a.lossLimit} was reached`};
-  if (d.net - d.roundCost < -a.lossLimit) return {kind: 'loss', text: `one more bet could pass the loss limit of ₹${a.lossLimit}`};
+  // Keep the next full stake inside the loss allowance. Stopping at equality also leaves
+  // room for the game's Auto Play/capture delay to cancel a queued wager.
+  if (d.net - d.roundCost <= -a.lossLimit) return {kind: 'loss', text: `the next bet could reach the loss limit of ₹${a.lossLimit}`};
   if (d.net >= a.profitTarget) return {kind: 'profit', text: `the profit target of ₹${a.profitTarget} was reached`};
   if (a.protect && d.peak >= a.profitTarget / 2 && d.net <= d.peak / 2) return {kind: 'kept', text: `the profit was falling back from ₹${round2(d.peak)}, so ₹${round2(d.net)} was kept`};
   if (d.rounds >= a.maxRounds) return {kind: 'rounds', text: `${a.maxRounds} rounds were played`};
@@ -57,7 +59,7 @@ function replayDay(values, a, base, start, {times = [], gaps = []} = {}) {
     debt = round2(Math.max(0, debt - result));
     peak = Math.max(peak, net);
     const next = planNext(a, base, debt, Math.floor(a.lossLimit + net));
-    const stop = stopReason(a, {net, rounds, ms: 0, streak, peak, roundCost: base + rider});
+    const stop = stopReason(a, {net, rounds, ms: 0, streak, peak, roundCost: next.stake + rider});
     if (stop) return {net, rounds, kind: stop.kind};
     if (streak >= a.lossStreak) { i += a.pauseRounds; streak = 0; } // Sits these rounds out.
     else if (next.stake !== stake || next.target !== target) i += 1; // Changing the bet takes a round.

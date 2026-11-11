@@ -1389,7 +1389,7 @@ function createMonitor({
     const split = a.plan === 'split', total = round2(stake + (split ? a.riderBet : 0));
     if (split && panel.slots.length < 2) return fail('The split plan needs both bet panels of the game on screen.');
     if (total > balance) return fail(`The bet (₹${total}) is more than the game balance (₹${balance}).`);
-    if (day.net - total < -a.lossLimit) return fail(`One more round of ₹${total} could pass today's loss limit of ₹${a.lossLimit}.`);
+    if (day.net - total <= -a.lossLimit) return fail(`One more round of ₹${total} could reach today's loss limit of ₹${a.lossLimit}.`);
     if (day.rounds >= a.maxRounds) return fail(`Today's limit of ${a.maxRounds} rounds is used up.`);
     pilot = {...pilot, on: true, phase: 'running', startedAt: Date.now(), stake, base: stake, target: a.plan === 'single' ? a.target : a.minTarget, debt: 0, streak: 0, lastTick: Date.now(), fails: 0, needCut: false};
     pilotSay(split ? `Autopilot on: ₹${stake} cashing out at ${a.minTarget}× and ₹${round2(a.riderBet)} riding to ${a.maxTarget}×, every round.`
@@ -1490,7 +1490,9 @@ function createMonitor({
       // bigger bet instead, never above the largest bet, the balance, or the room to the loss limit.
       const funds = panel && panel.balance !== null ? Math.floor(panel.balance) : Infinity;
       const {stake: nextStake, target: nextTarget} = Pilot.planNext(a, pilot.base, pilot.debt, Math.floor(a.lossLimit + day.net), funds);
-      const roundCost = round2(pilot.base + (a.plan === 'split' ? a.riderBet : 0));
+      // Recovery mode can raise the next stake. Use that actual exposure when deciding
+      // whether to stop, rather than checking only the base bet.
+      const roundCost = round2(nextStake + (a.plan === 'split' ? a.riderBet : 0));
       const why = Pilot.stopReason(a, {net: day.net, rounds: day.rounds, ms: day.ms, streak: pilot.streak, peak: day.peak || 0, roundCost});
       const stop = why ? why.text : sessionState().stopped ? "the day's stop-loss was reached" : '';
       if (stop) { await pilotStop(stop, true, why ? why.kind : 'stoploss'); return; }

@@ -166,7 +166,7 @@ server's public folder (such as `/var/www`); the script refuses to continue ther
 
 ## Reliability and security changes
 
-Autopilot responds to control changes and checks again every 250 ms. If a bet is pending, in flight, or disabled it shows Waiting and starts only when the slot is available. It verifies the amount and Auto Cash Out before enabling Auto Play and refuses to adopt active settings that differ. This improves execution reliability, not the probability of winning. No historical pattern is used to select a winning round. Actual game acceptance and network latency remain outside the monitor's control.
+Autopilot responds to control changes and checks again every 250 ms. If a bet is pending, in flight, or disabled it shows Waiting and starts only when the slot is available. It verifies the amount and Auto Cash Out before enabling Auto Play and refuses to adopt active settings that differ. It stops before the next full bet could reach the loss limit, accounting for the actual recovery stake. A wager already in flight can still settle after a stop is requested, so the configured limit is not a guaranteed exact ceiling. This improves execution reliability, not the probability of winning. No historical pattern is used to select a winning round. Actual game acceptance and network latency remain outside the monitor's control.
 
 Stale capture stops autopilot and attempts to disable the game's Auto Play. New bets remain blocked while capture is stale. A failed data write locks betting until storage is repaired and the monitor is restarted. A failed stop attempt still requires checking the actual game window.
 

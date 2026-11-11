@@ -829,6 +829,11 @@ test('autopilot: starts the game\'s Auto Play with the set bet, pauses after los
   // Ended by the loss limit: raising the limits does not open the day again.
   assert.equal((await setup({lossLimit: 1000, maxRounds: 500})).reopened, false);
   assert.match((await pilot({on: true})).error, /start again tomorrow/);
+  // Start a new day: counts and limits from zero, and the autopilot can start again.
+  assert.equal((await post('/api/autopilot/newday').then(r => r.json())).ok, true);
+  st = await state();
+  assert.deepEqual([st.autopilot.day.net, st.autopilot.day.rounds, st.autopilot.day.stopped, st.session.bets], [0, 0, '', 0]);
+  await setup({lossLimit: 40, maxRounds: 50});
   assert.ok(st.autopilot.log.some(l => /Stopped for today/.test(l.text)));
   await balance(1000);
 });

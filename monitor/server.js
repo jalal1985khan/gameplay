@@ -1107,9 +1107,13 @@ function createMonitor({
   let pilot = {on: false, phase: 'off', startedAt: 0, stake: 0, base: 0, target: 0, debt: 0, streak: 0, pauseUntil: 0, lastTick: 0, engagedAt: 0, engageBalance: null, watchLow: null, firstCheck: false, fails: 0, needCut: false, note: '', log: []};
   let pilotTicking = false;
   const savePilot = () => { try { atomicWrite(pilotFile, JSON.stringify(pilotCfg)); } catch {} };
+  // Days ended before the reason was stored: the reason is read back from its text.
+  const kindOf = text => /loss limit|stop-loss/.test(text) ? 'loss' : /rounds were played/.test(text) ? 'rounds' : /minutes were played/.test(text) ? 'minutes'
+    : /profit target/.test(text) ? 'profit' : /falling back/.test(text) ? 'kept' : /losses in a row/.test(text) ? 'streak' : 'loss';
   function pilotDay() {
     const day = dayOf(Date.now());
     if (!pilotCfg.day || pilotCfg.day.day !== day) pilotCfg.day = {day, net: 0, peak: 0, rounds: 0, ms: 0, stopped: ''};
+    if (pilotCfg.day.stopped && !pilotCfg.day.stoppedKind) pilotCfg.day.stoppedKind = kindOf(pilotCfg.day.stopped);
     return pilotCfg.day;
   }
   function pilotSay(text) {
@@ -1244,6 +1248,18 @@ function createMonitor({
     if (!r.ok) { await pilotStop(`it could not start the game's Auto Play (${r.error})`, false); return fail(r.error); }
     broadcast();
     return {ok: true, autopilot: pilotState()};
+  }
+  // A fresh day on request: the autopilot's totals and limits start again from zero, and so does
+  // the day in the bet tracker (with the same budget).
+  function pilotNewDay() {
+    if (pilot.on) return {ok: false, error: 'Stop the autopilot first.'};
+    const old = pilotDay();
+    pilotSay(`New day started by you (the day before ended at ₹${old.net} after ${old.rounds} rounds).`);
+    pilotCfg.day = null;
+    pilotDay();
+    pilot.streak = 0; pilot.debt = 0;
+    savePilot();
+    return resetSession(session.budget);
   }
   // The settings worked out from a budget and a loss limit, saved for the person to start.
   function pilotAuto({budget, loss} = {}) {
@@ -1482,6 +1498,7 @@ function createMonitor({
       if (pathname === '/api/game/login') return send(await loginGame(await readJson(req)));
       if (pathname === '/api/game/click') return send(await clickGame(await readJson(req)));
       if (pathname === '/api/autopilot') return send(await pilotSwitch(await readJson(req)));
+      if (pathname === '/api/autopilot/newday') return send(pilotNewDay());
       if (pathname === '/api/autopilot/auto') return send(pilotAuto(await readJson(req)));
       if (pathname === '/api/autopilot/settings') return send(saveAutopilot(await readJson(req)));
       if (pathname === '/api/game/cutoff') return send(await handleCutOff(await readJson(req)));

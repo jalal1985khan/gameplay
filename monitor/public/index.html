@@ -138,7 +138,7 @@
   .ptoday{margin:6px 0 10px;font-size:14px;text-align:center;color:var(--muted)}
   .ptoday b{color:var(--text)}
   .pilot .setmsg{text-align:center;font-size:13px;margin-bottom:8px}.pilot .setmsg:empty{display:none}
-  #pilotSettings{display:block;margin:0 auto;padding:8px 14px;font-size:13px}
+  #pilotSettings,#pilotNewDay{display:block;margin:0 auto 8px;padding:8px 14px;font-size:13px}
   .plog{padding:4px 0;border-top:1px solid var(--border)}
   .plog span{color:var(--text);font-variant-numeric:tabular-nums;margin-right:6px}
   dialog input[type="number"]{width:100%;margin-top:6px;padding:10px;font-size:15px;flex:1 1 80px;background:var(--bg)}
@@ -713,6 +713,7 @@
       <div class="pstatus ${p.on ? (p.phase === 'paused' ? 'wait' : 'good') : p.day.stopped ? 'bad' : ''}">${status}</div>
       <div class="ptoday">Autopilot today: <b class="${p.day.net > 0 ? 'good' : p.day.net < 0 ? 'bad' : ''}">${signed(p.day.net)}</b> · ${p.day.rounds} round${p.day.rounds === 1 ? '' : 's'} · ${p.day.minutes} min</div>
       <div class="setmsg bad" id="pilotMsg">${pilotError}</div>
+      ${!p.on && p.day.rounds ? '<button type="button" id="pilotNewDay" class="secondary-btn">Start a new day</button>' : ''}
       <button type="button" id="pilotSettings" class="secondary-btn"${p.on ? ' disabled title="Stop the autopilot to change its settings"' : ''}>Change autopilot settings</button>
       <details class="more" id="pilotLog"${pilotLogOpen ? ' open' : ''}><summary>What it did (${p.log.length})</summary>${p.log.length ? p.log.map(l => `<div class="plog"><span>${clock(l.at)}</span> ${l.text}</div>`).join('') : '<div class="plog">Nothing yet.</div>'}</details>
       <p class="fine">The autopilot starts the game's own Auto Play on Bet 1 with real money and stops it by these rules. It decides when to stop, not which rounds win: every round is random.</p>`;
@@ -766,6 +767,13 @@
       e.target.disabled = true;
       unlockSound();
       const r = await post('/api/autopilot', {on});
+      pilotError = r.ok ? '' : r.error;
+      renderPilot();
+    }
+    if (e.target.id === 'pilotNewDay') {
+      const d = state.autopilot.day, a = state.autopilot.settings;
+      if (!confirm(`Start a new day?\n\nToday so far: ${signed(d.net)} after ${d.rounds} rounds. The autopilot's counts and limits start again from zero, so it can lose up to ${money(a.lossLimit)} more. Today's tracked bets are cleared from My results.`)) return;
+      const r = await post('/api/autopilot/newday');
       pilotError = r.ok ? '' : r.error;
       renderPilot();
     }

@@ -941,7 +941,12 @@ test('autopilot plans: cash-out raised after losses within a range; and a split 
   await shows([['10', '1.5', false], ['5', '7', false]]);
   await gameFrame.evaluate(() => document.getElementById('second').remove());
   await until(state, s => s.session.game.slots.length === 1);
-  await setup({plan: 'single'});
+  // Quick setup from two numbers, and the replay asks for enough captured rounds.
+  const auto = await post('/api/autopilot/auto', {budget: 1000, loss: 100}).then(r => r.json());
+  assert.deepEqual([auto.ok, auto.settings.lossLimit, auto.settings.profitTarget, auto.settings.betValue, auto.settings.plan, auto.settings.protect], [true, 100, 50, 5, 'range', true]);
+  assert.match((await post('/api/autopilot/auto', {budget: 100, loss: 500}).then(r => r.json())).error, /cannot be more than the budget/);
+  assert.match((await fetch(base + '/api/autopilot/replay').then(r => r.json())).error, /at least 200 rounds/);
+  await setup({plan: 'single', protect: false});
   await balance(1000);
 });
 

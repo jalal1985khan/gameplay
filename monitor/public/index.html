@@ -108,6 +108,20 @@
   .gamemore{margin-top:10px}
   .gamepanel .press.main{margin-top:0}
   .gamepanel .press.main button{flex:1;padding:10px 12px;font-size:14px;margin-top:0}
+  .quick{text-align:left;margin-bottom:14px;padding:12px;border:1px solid var(--border);border-radius:9px;background:#1b2130;font-size:14px}
+  .quick .pair{display:flex;align-items:center;gap:8px;margin-top:8px;color:var(--muted)}
+  .quick .pair span{flex:0 0 170px}
+  .quick input{flex:1 1 90px;padding:9px 10px;font-size:14px}
+  .quick button{width:100%;margin-top:10px;padding:12px;font-size:15px}
+  .quick .setmsg{font-size:13px;margin-top:8px}.quick .setmsg:empty{display:none}
+  .replay{margin-top:14px;text-align:left}
+  .replay button{display:block;margin:0 auto;padding:8px 14px;font-size:13px}
+  .ptable{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+  .ptable th,.ptable td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right}
+  .ptable th:first-child,.ptable td:first-child{text-align:left}
+  .ptable th{color:var(--muted);font-weight:600}
+  .ptable tr.cur td{background:#1f2536}
+  .ptable .tag{font-size:11px;color:var(--muted)}
   .pilot{text-align:left}
   .plist{margin:0 0 12px;padding-left:18px;font-size:14px;color:var(--muted);line-height:1.6}
   .plist b{color:var(--text)}
@@ -311,6 +325,8 @@
         <p class="fine">After a loss the next bet is sized so one win covers the open losses plus a normal win. A lower cash-out here wins more often but needs a bigger bet. A run of losses reaches your loss limit much sooner this way; it does not change the odds.</p>
       </div>
       </div>
+      <label class="check"><input type="checkbox" id="apProtect"> 8. Protect a good day</label>
+      <p class="fine">Once it is up by half the profit target, it stops for the day if the profit falls back to half of its best.</p>
       <p class="fine">These limits decide when the autopilot stops. They cannot make a round more likely to win: every round is random, and the game keeps about 3% of all bets over time.</p>
       <div class="warn" id="pilotError" hidden></div>
       <div class="dialog-actions">
@@ -380,7 +396,18 @@
         </details>
         <p class="fine" id="betFine"></p>
       </div>
-      <div id="viewPilot" hidden><div class="pilot" id="pilotBox"></div></div>
+      <div id="viewPilot" hidden>
+        <form class="quick" id="quickForm">
+          <strong>Quick setup</strong>
+          <div class="pair"><span>Today's budget ₹</span><input id="qBudget" type="number" min="100" step="1" required aria-label="Today's budget"></div>
+          <div class="pair"><span>Most I accept to lose ₹</span><input id="qLoss" type="number" min="20" step="1" required aria-label="Most I accept to lose"></div>
+          <button type="submit" id="qGo">Set up and start</button>
+          <p class="fine">The autopilot works out the bet, the cash-out and a profit target from these two numbers, shows them to you, and starts when you confirm. Or set every value yourself below.</p>
+          <div class="setmsg bad" id="qMsg"></div>
+        </form>
+        <div class="pilot" id="pilotBox"></div>
+        <div class="replay"><button type="button" id="replayGo" class="secondary-btn">Try these settings on my captured rounds</button><div id="replayOut"></div></div>
+      </div>
     </div>
     <div class="advice" id="advice"></div>
   </div>
@@ -666,6 +693,7 @@
           : `<b>${bet}</b>, cash out at <b>${a.target}×</b>`}</li>
         <li>Stops for today at: <b>${money(a.lossLimit)} lost</b>, <b>${money(a.profitTarget)} won</b>, <b>${a.maxRounds} rounds</b> or <b>${a.maxMinutes} minutes</b></li>
         <li>After <b>${a.lossStreak}</b> losses in a row: <b>${after}</b></li>
+        ${a.protect ? '<li>A good day is <b>protected</b>: it stops if the profit falls back to half of its best</li>' : ''}
         <li${a.plan === 'single' ? '' : ' hidden'}>After a loss: ${a.recover ? `<b>raises the bet</b> to win it back, up to <b>${money(a.maxBet)}</b>, cashing out at <b>${a.recoverTarget}×</b>` : '<b>keeps the same bet</b>'}</li>
       </ul>
       <button type="button" id="pilotGo" class="bet${p.on ? ' halt' : ''}"${!p.on && (p.day.stopped || !live) ? ' disabled' : ''}>${p.on ? 'Stop autopilot' : 'Start autopilot'}</button>
@@ -678,6 +706,37 @@
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
   let pilotError = '';
+  const startText = a => `Start the autopilot? It will bet real money by itself:\n\n` +
+    `• ${a.betMode === 'percent' ? `${a.betValue}% of the balance` : money(a.betValue)} a round` +
+    (a.plan === 'split' ? `, cashing out at ${a.minTarget}×, plus ${money(a.riderBet)} riding to ${a.maxTarget}×` : a.plan === 'range' ? `, cashing out at ${a.minTarget}×, raised after losses up to ${a.maxTarget}×` : `, cashing out at ${a.target}×${a.recover ? `, raising the bet after a loss up to ${money(a.maxBet)}` : ''}`) +
+    `\n• stops for today at ${money(a.lossLimit)} lost or ${money(a.profitTarget)} won\n• at most ${a.maxRounds} rounds or ${a.maxMinutes} minutes\n\nNo setting can make a round more likely to win.`;
+  $('quickForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const say = text => { $('qMsg').textContent = text; };
+    if (state && state.autopilot && state.autopilot.on) return say('Stop the autopilot first.');
+    say('');
+    let r = await post('/api/autopilot/auto', {budget: Number($('qBudget').value), loss: Number($('qLoss').value)});
+    if (!r.ok) return say(r.error);
+    try { localStorage.setItem('quickBudget', $('qBudget').value); localStorage.setItem('quickLoss', $('qLoss').value); } catch {}
+    if (!confirm(startText(r.settings))) return say('Set up, not started. Press Start autopilot when you are ready.');
+    unlockSound();
+    r = await post('/api/autopilot', {on: true});
+    pilotError = r.ok ? '' : r.error;
+    renderPilot();
+  });
+  try { $('qBudget').value = localStorage.getItem('quickBudget') || ''; $('qLoss').value = localStorage.getItem('quickLoss') || ''; } catch {}
+  $('replayGo').addEventListener('click', async () => {
+    const out = $('replayOut');
+    out.textContent = 'Replaying…';
+    const r = await fetch('/api/autopilot/replay').then(x => x.json()).catch(() => ({ok: false, error: 'No answer from the monitor.'}));
+    if (!r.ok) { out.innerHTML = `<p class="fine bad">${r.error}</p>`; return; }
+    const pc = v => `${Math.round(v * 100)}%`;
+    out.innerHTML = `<p class="fine">Each way to cash out, played over your ${r.rounds} captured rounds as many separate days (${money(r.base)} bet, stop at ${money(r.lossLimit)} lost or ${money(r.profitTarget)} won). Days overlap, so read it as a rough picture.</p>
+      <div class="table-scroll"><table class="ptable"><thead><tr><th>Way to cash out</th><th>Days ending at profit</th><th>Days ending at the loss limit</th><th>Average day</th><th>Worst day</th></tr></thead><tbody>${
+        r.plans.map(p => !p.days ? `<tr><td>${p.label}</td><td colspan="4">not enough rounds</td></tr>` : `<tr${p.current ? ' class="cur"' : ''}><td>${p.label}${p.current ? ' <span class="tag">set now</span>' : ''}</td><td>${pc(p.profit + p.kept)}</td><td>${pc(p.loss)}</td><td class="${p.average > 0 ? 'good' : p.average < 0 ? 'bad' : ''}">${signed(p.average)}</td><td class="bad">${signed(p.worst)}</td></tr>`).join('')
+      }</tbody></table></div>
+      <p class="fine">This is what the rules did on rounds that already happened. It does not tell what the next rounds will do; over many days every way costs about 3% of what is bet.</p>`;
+  });
   $('views').addEventListener('click', e => {
     const b = e.target.closest('button[data-view]');
     if (!b) return;
@@ -690,7 +749,7 @@
     if (e.target.id === 'pilotGo') {
       const on = !(state && state.autopilot && state.autopilot.on);
       const a = state.autopilot.settings;
-      if (on && !confirm(`Start the autopilot? It will bet real money by itself: ${a.betMode === 'percent' ? `${a.betValue}% of the balance` : money(a.betValue)} a round, ${a.plan === 'split' ? `plus ${money(a.riderBet)} on a second bet, ` : a.plan === 'single' && a.recover ? `raising the bet after a loss up to ${money(a.maxBet)}, ` : ''}until ${money(a.lossLimit)} is lost, ${money(a.profitTarget)} is won, or ${a.maxRounds} rounds / ${a.maxMinutes} minutes are played.`)) return;
+      if (on && !confirm(startText(a))) return;
       e.target.disabled = true;
       unlockSound();
       const r = await post('/api/autopilot', {on});
@@ -705,6 +764,7 @@
       $('apPauseRow').hidden = a.lossAction === 'stop';
       $('apRecover').value = a.recover ? '1' : '0'; $('apRecoverTarget').value = a.recoverTarget; $('apMaxBet').value = a.maxBet;
       $('apRecoverRows').hidden = !a.recover;
+      $('apProtect').checked = !!a.protect;
       $('apPlan').value = a.plan; $('apMin').value = a.minTarget; $('apMax').value = a.maxTarget; $('apRider').value = a.riderBet;
       showPlan();
       $('pilotError').hidden = true;
@@ -730,7 +790,7 @@
     const n = id => Number($(id).value);
     const r = await post('/api/autopilot/settings', {lossLimit: n('apLoss'), profitTarget: n('apProfit'), betMode: $('apBetMode').value, betValue: n('apBetValue'), target: n('apTarget') || 2,
       maxRounds: n('apRounds'), maxMinutes: n('apMinutes'), lossStreak: n('apStreak'), lossAction: $('apAction').value, pauseRounds: n('apPause') || 1,
-      plan: $('apPlan').value, minTarget: n('apMin') || 1.5, maxTarget: n('apMax') || 7, riderBet: n('apRider') || 1,
+      protect: $('apProtect').checked, plan: $('apPlan').value, minTarget: n('apMin') || 1.5, maxTarget: n('apMax') || 7, riderBet: n('apRider') || 1,
       recover: $('apRecover').value === '1', recoverTarget: n('apRecoverTarget') || 2, maxBet: n('apMaxBet') || 1});
     if (!r.ok) { $('pilotError').textContent = r.error; $('pilotError').hidden = false; return; }
     pilotError = '';

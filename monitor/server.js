@@ -13,6 +13,7 @@ const AviatorMatch = require('./lib/match.js');
 const Analysis = require('./lib/analysis.js');
 const {createStore, atomicWrite} = require('./lib/store.js');
 const {createAuth} = require('./lib/auth.js');
+const Pilot = require('./lib/pilot.js');
 
 // Rounds kept in memory for the page and the analysis; the log on disk keeps every round.
 const MAX_ROUNDS = 50000;
@@ -65,7 +66,7 @@ function createMonitor({
   try { settings = {...settings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8'))}; } catch {}
   // The autopilot's limits (set by the person on its settings screen) and its totals for the day.
   const pilotFile = path.join(dataDir, 'autopilot.json');
-  const pilotCfg = {settings: {lossLimit: 250, profitTarget: 200, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 3, lossAction: 'pause', pauseRounds: 5, recover: false, recoverTarget: 2, maxBet: 100, plan: 'single', minTarget: 1.5, maxTarget: 7, riderBet: 5}, day: null};
+  const pilotCfg = {settings: {lossLimit: 250, profitTarget: 200, betMode: 'fixed', betValue: 10, target: 2, maxRounds: 50, maxMinutes: 60, lossStreak: 3, lossAction: 'pause', pauseRounds: 5, recover: false, recoverTarget: 2, maxBet: 100, plan: 'single', minTarget: 1.5, maxTarget: 7, riderBet: 5, protect: false}, day: null};
   try { const saved = JSON.parse(fs.readFileSync(pilotFile, 'utf8')); pilotCfg.settings = {...pilotCfg.settings, ...(saved.settings || {})}; pilotCfg.day = saved.day || null; } catch {}
   function saveSettings(input = {}) {
     const pause = Number(input.pauseRounds), share = Number(input.stopLossShare);
@@ -1065,7 +1066,7 @@ function createMonitor({
   const savePilot = () => { try { atomicWrite(pilotFile, JSON.stringify(pilotCfg)); } catch {} };
   function pilotDay() {
     const day = dayOf(Date.now());
-    if (!pilotCfg.day || pilotCfg.day.day !== day) pilotCfg.day = {day, net: 0, rounds: 0, ms: 0, stopped: ''};
+    if (!pilotCfg.day || pilotCfg.day.day !== day) pilotCfg.day = {day, net: 0, peak: 0, rounds: 0, ms: 0, stopped: ''};
     return pilotCfg.day;
   }
   function pilotSay(text) {
@@ -1091,6 +1092,7 @@ function createMonitor({
     };
     if (input.betMode !== undefined) { if (!['fixed', 'percent'].includes(input.betMode)) return {ok: false, error: 'Choose a fixed bet or a share of the balance.'}; a.betMode = input.betMode; }
     if (input.recover !== undefined) { if (typeof input.recover !== 'boolean') return {ok: false, error: 'Set "recover" to true or false.'}; a.recover = input.recover; }
+    if (input.protect !== undefined) { if (typeof input.protect !== 'boolean') return {ok: false, error: 'Set "protect" to true or false.'}; a.protect = input.protect; }
     if (input.plan !== undefined) { if (!['single', 'split', 'range'].includes(input.plan)) return {ok: false, error: 'Choose one of the three ways to bet.'}; a.plan = input.plan; }
     if (input.lossAction !== undefined) { if (!['pause', 'stop'].includes(input.lossAction)) return {ok: false, error: 'Choose pause or stop after losses in a row.'}; a.lossAction = input.lossAction; }
     const error = num('lossLimit', 1, 10000000, false, 'The daily loss limit') || num('profitTarget', 1, 10000000, false, 'The profit target')
@@ -1185,6 +1187,29 @@ function createMonitor({
     broadcast();
     return {ok: true, autopilot: pilotState()};
   }
+  // The settings worked out from a budget and a loss limit, saved for the person to start.
+  function pilotAuto({budget, loss} = {}) {
+    const made = Pilot.autoSettings(budget, loss);
+    if (made.error) return {ok: false, error: made.error};
+    return saveAutopilot(made.settings);
+  }
+  // Each way to cash out, with the limits now set, played over the captured rounds as many
+  // separate days. It shows what the rules did on rounds that happened, not what comes next.
+  function pilotReplay() {
+    const a = pilotCfg.settings, values = history.values;
+    if (values.length < 200) return {ok: false, error: `Capture at least 200 rounds first (${values.length} so far).`};
+    const balance = panel && panel.balance !== null ? panel.balance : null;
+    const base = a.betMode === 'percent' ? Math.max(1, Math.floor((balance ?? 1000) * a.betValue / 100)) : round2(a.betValue);
+    const plans = [
+      {key: 'single', label: `One number: ${a.target}×`, over: {plan: 'single', recover: false}},
+      {key: 'recover', label: `One number, bet raised after a loss (up to ₹${a.maxBet})`, over: {plan: 'single', recover: true}},
+      {key: 'split', label: `Two bets: ₹${base} at ${a.minTarget}× and ₹${a.riderBet} at ${a.maxTarget}×`, over: {plan: 'split'}},
+      {key: 'range', label: `Cash-out raised after losses: ${a.minTarget}× to ${a.maxTarget}×`, over: {plan: 'range'}},
+    ];
+    const now = a.plan === 'single' ? (a.recover ? 'recover' : 'single') : a.plan;
+    return {ok: true, rounds: values.length, base, lossLimit: a.lossLimit, profitTarget: a.profitTarget,
+      plans: plans.map(p => ({key: p.key, label: p.label, current: p.key === now, ...Pilot.replaySummary(values, {...a, ...p.over}, base)}))};
+  }
   async function pilotTick() {
     if (pilotTicking) return;
     pilotTicking = true;
@@ -1221,6 +1246,7 @@ function createMonitor({
         const net = round2(group.reduce((n, b) => n + b.profit, 0));
         for (const b of group) b.piloted = true;
         day.net = round2(day.net + net);
+        day.peak = Math.max(day.peak || 0, day.net);
         day.rounds++;
         pilot.streak = net < 0 ? pilot.streak + 1 : 0;
         // What is still to be won back: a losing round adds to it, a winning round pays it down.
@@ -1231,24 +1257,11 @@ function createMonitor({
       // was lost. "range": the same bet, with the cash-out raised just enough for one win to
       // cover the open losses, between the lowest and highest set. "single" with win-back: a
       // bigger bet instead, never above the largest bet, the balance, or the room to the loss limit.
-      let nextStake = pilot.base, nextTarget = a.plan === 'single' ? a.target : a.minTarget;
-      if (a.plan === 'range' && pilot.debt > 0) {
-        const need = 1 + (pilot.debt + pilot.base * (a.minTarget - 1)) / pilot.base;
-        nextTarget = Math.min(a.maxTarget, Math.max(a.minTarget, Math.ceil(need * 100 - 1e-6) / 100));
-      } else if (a.plan === 'single' && a.recover && pilot.debt > 0) {
-        nextTarget = a.recoverTarget;
-        const room = Math.floor(a.lossLimit + day.net), funds = panel && panel.balance !== null ? Math.floor(panel.balance) : Infinity;
-        nextStake = Math.max(pilot.base, Math.min(Math.ceil((pilot.debt + pilot.base * (a.target - 1)) / (nextTarget - 1)), a.maxBet, room, funds));
-      }
+      const funds = panel && panel.balance !== null ? Math.floor(panel.balance) : Infinity;
+      const {stake: nextStake, target: nextTarget} = Pilot.planNext(a, pilot.base, pilot.debt, Math.floor(a.lossLimit + day.net), funds);
       const roundCost = round2(pilot.base + (a.plan === 'split' ? a.riderBet : 0));
-      let stop = '';
-      if (day.net <= -a.lossLimit) stop = `the loss limit of ₹${a.lossLimit} was reached`;
-      else if (day.net - roundCost < -a.lossLimit) stop = `one more bet could pass the loss limit of ₹${a.lossLimit}`;
-      else if (day.net >= a.profitTarget) stop = `the profit target of ₹${a.profitTarget} was reached`;
-      else if (day.rounds >= a.maxRounds) stop = `${a.maxRounds} rounds were played`;
-      else if (day.ms >= a.maxMinutes * 60000) stop = `${a.maxMinutes} minutes were played`;
-      else if (sessionState().stopped) stop = "the day's stop-loss was reached";
-      else if (pilot.streak >= a.lossStreak && a.lossAction === 'stop') stop = `${pilot.streak} losses in a row`;
+      const why = Pilot.stopReason(a, {net: day.net, rounds: day.rounds, ms: day.ms, streak: pilot.streak, peak: day.peak || 0, roundCost});
+      const stop = why ? why.text : sessionState().stopped ? "the day's stop-loss was reached" : '';
       if (stop) { await pilotStop(stop, true); return; }
       const playing = pilotLegs().every(l => !!(panel && panel.slots[l.slot] && panel.slots[l.slot].autoPlay === true));
       if (pilot.phase === 'running' && pilot.streak >= a.lossStreak) {
@@ -1410,6 +1423,7 @@ function createMonitor({
       if (pathname === '/api/game/login') return send(await loginGame(await readJson(req)));
       if (pathname === '/api/game/click') return send(await clickGame(await readJson(req)));
       if (pathname === '/api/autopilot') return send(await pilotSwitch(await readJson(req)));
+      if (pathname === '/api/autopilot/auto') return send(pilotAuto(await readJson(req)));
       if (pathname === '/api/autopilot/settings') return send(saveAutopilot(await readJson(req)));
       if (pathname === '/api/game/cutoff') return send(await handleCutOff(await readJson(req)));
       if (pathname === '/api/settings') return send(saveSettings(await readJson(req)));
@@ -1441,6 +1455,7 @@ function createMonitor({
         req.on('close', () => clients.delete(res));
         return;
       }
+      if (pathname === '/api/autopilot/replay') return json(200, pilotReplay());
       if (pathname === '/api/inspect') return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify(await inspect()));
       if (pathname === '/api/diagnose') return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify(await diagnose(), null, 1));
       if (pathname === '/api/state') return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify(state()));

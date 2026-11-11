@@ -131,6 +131,7 @@
   .pilot{text-align:left}
   .plist{margin:0 0 12px;padding-left:18px;font-size:14px;color:var(--muted);line-height:1.6}
   .plist b{color:var(--text)}
+  .plist li.bad{color:var(--low)}
   button.bet.halt{background:#ef4444;color:#fff}
   button.bet:disabled{opacity:.45;cursor:not-allowed}
   .pstatus{margin-top:10px;font-size:14px;text-align:center}
@@ -706,6 +707,7 @@
           : `<b>${bet}</b>, cash out at <b>${a.target}×</b>`}</li>
         <li>Stops for today at: <b>${money(a.lossLimit)} lost</b>, <b>${money(a.profitTarget)} won</b>, <b>${a.maxRounds} rounds</b> or <b>${a.maxMinutes} minutes</b></li>
         <li>After <b>${a.lossStreak}</b> losses in a row: <b>${after}</b></li>
+        ${fits(a) < 10 ? `<li class="bad">Only <b>${fits(a)}</b> losing round${fits(a) === 1 ? '' : 's'} fit in your loss limit: one bad run ends the day. A bet of ${money(Math.max(1, Math.floor(a.lossLimit / 20)))} lets 20 fit.</li>` : ''}
         ${a.protect ? '<li>A good day is <b>protected</b>: it stops if the profit falls back to half of its best</li>' : ''}
         <li${a.plan === 'single' ? '' : ' hidden'}>After a loss: ${a.recover ? `<b>raises the bet</b> to win it back, up to <b>${money(a.maxBet)}</b>, cashing out at <b>${a.recoverTarget}×</b>` : '<b>keeps the same bet</b>'}</li>
       </ul>
@@ -720,7 +722,9 @@
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
   let pilotError = '';
-  const startText = a => `Start the autopilot? It will bet real money by itself:\n\n` +
+  // How many losing rounds in a row fit in the loss limit at this bet (a fixed bet only).
+  const fits = a => a.betMode === 'percent' ? 99 : Math.floor(a.lossLimit / (a.betValue + (a.plan === 'split' ? a.riderBet : 0)));
+  const startText = a => (fits(a) < 10 ? `WARNING: only ${fits(a)} losing round${fits(a) === 1 ? '' : 's'} fit in your loss limit of ${money(a.lossLimit)}.\n\n` : '') + `Start the autopilot? It will bet real money by itself:\n\n` +
     `• ${a.betMode === 'percent' ? `${a.betValue}% of the balance` : money(a.betValue)} a round` +
     (a.plan === 'split' ? `, cashing out at ${a.minTarget}×, plus ${money(a.riderBet)} riding to ${a.maxTarget}×` : a.plan === 'range' ? `, cashing out at ${a.minTarget}×, raised after losses up to ${a.maxTarget}×` : `, cashing out at ${a.target}×${a.recover ? `, raising the bet after a loss up to ${money(a.maxBet)}` : ''}`) +
     `\n• stops for today at ${money(a.lossLimit)} lost or ${money(a.profitTarget)} won\n• at most ${a.maxRounds} rounds or ${a.maxMinutes} minutes\n\nNo setting can make a round more likely to win.`;
@@ -809,6 +813,8 @@
   $('pilotForm').addEventListener('submit', async e => {
     e.preventDefault();
     const n = id => Number($(id).value);
+    const draft = {lossLimit: n('apLoss'), betMode: $('apBetMode').value, betValue: n('apBetValue'), plan: $('apPlan').value, riderBet: n('apRider') || 0};
+    if (fits(draft) < 10 && !confirm(`With a bet of ${money(draft.betValue)} and a loss limit of ${money(draft.lossLimit)}, only ${fits(draft)} losing round${fits(draft) === 1 ? '' : 's'} fit before the day ends. Rounds crash below 1.5× about one time in three, so that can happen within minutes. Save anyway?`)) return;
     const r = await post('/api/autopilot/settings', {lossLimit: n('apLoss'), profitTarget: n('apProfit'), betMode: $('apBetMode').value, betValue: n('apBetValue'), target: n('apTarget') || 2,
       maxRounds: n('apRounds'), maxMinutes: n('apMinutes'), lossStreak: n('apStreak'), lossAction: $('apAction').value, pauseRounds: n('apPause') || 1,
       protect: $('apProtect').checked, plan: $('apPlan').value, minTarget: n('apMin') || 1.5, maxTarget: n('apMax') || 7, riderBet: n('apRider') || 1,

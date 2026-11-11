@@ -14,6 +14,7 @@ const Analysis = require('./lib/analysis.js');
 const {createStore, atomicWrite} = require('./lib/store.js');
 const {createAuth} = require('./lib/auth.js');
 const Pilot = require('./lib/pilot.js');
+const crypto = require('crypto');
 
 // Rounds kept in memory for the page and the analysis; the log on disk keeps every round.
 const MAX_ROUNDS = 50000;
@@ -452,6 +453,7 @@ function createMonitor({
       recent: values.slice(start).map((v, i) => ({v, at: times[start + i], gap: gaps.includes(start + i)})).reverse(),
       session: sessionState(),
       autopilot: pilotState(),
+      gameLogin: {saved: savedLoginName()},
       settings,
     };
   }
@@ -669,8 +671,46 @@ function createMonitor({
 
   // Types what the admin entered into the game site's own login form and submits it. The
   // username and password are used for this one call only: never stored, logged or sent back.
-  async function loginGame({username, password} = {}) {
+  // The game login, kept only when the admin asks for it: encrypted in data/game-login.json with
+  // a key in a separate file, both readable by the monitor's own user only. It is never sent to
+  // the page; the page learns only that a login is saved, and for which username.
+  const loginFile = path.join(dataDir, 'game-login.json'), loginKeyFile = path.join(dataDir, 'game-login.key');
+  function loginKey(create) {
+    try { const k = fs.readFileSync(loginKeyFile); if (k.length === 32) return k; } catch {}
+    if (!create) return null;
+    const k = crypto.randomBytes(32);
+    fs.mkdirSync(dataDir, {recursive: true});
+    fs.writeFileSync(loginKeyFile, k, {mode: 0o600});
+    return k;
+  }
+  function saveLogin(username, password) {
+    const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', loginKey(true), iv);
+    const data = Buffer.concat([c.update(JSON.stringify({username, password}), 'utf8'), c.final()]);
+    fs.writeFileSync(loginFile, JSON.stringify({username, iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: data.toString('base64')}), {mode: 0o600});
+  }
+  function savedLogin() {
+    try {
+      const f = JSON.parse(fs.readFileSync(loginFile, 'utf8')), key = loginKey(false);
+      if (!key) return null;
+      const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(f.iv, 'base64'));
+      d.setAuthTag(Buffer.from(f.tag, 'base64'));
+      return JSON.parse(Buffer.concat([d.update(Buffer.from(f.data, 'base64')), d.final()]).toString('utf8'));
+    } catch { return null; }
+  }
+  const savedLoginName = () => { try { return String(JSON.parse(fs.readFileSync(loginFile, 'utf8')).username || ''); } catch { return ''; } };
+  function forgetLogin() {
+    for (const f of [loginFile, loginKeyFile]) try { fs.rmSync(f, {force: true}); } catch {}
+    broadcast();
+    return {ok: true};
+  }
+  async function loginGame({username, password, remember, saved} = {}) {
     const fail = error => ({ok: false, error});
+    if (saved === true) {
+      const kept = savedLogin();
+      if (!kept) return fail('No game login is saved on this server.');
+      ({username, password} = kept);
+      remember = false;
+    }
     username = String(username ?? '').trim();
     password = String(password ?? '');
     if (!username || !password) return fail('Enter the game username and password.');
@@ -707,7 +747,10 @@ function createMonitor({
       await pw.press('Enter', {timeout: 3000});
       for (let i = 0; i < 20; i++) {
         await wait(400);
-        if (!await findField()) return {ok: true};
+        if (!await findField()) {
+          if (remember === true) { try { saveLogin(username, password); } catch {} broadcast(); }
+          return {ok: true, saved: remember === true};
+        }
       }
       return fail('The game still shows its login form: the username or password was not accepted, or it asks for something more. Use Open game window to check.');
     } catch (e) {
@@ -1420,6 +1463,7 @@ function createMonitor({
       if (pathname === '/api/bet') return send(placeBet(await readJson(req)));
       if (pathname === '/api/bet/undo') return send(undoBet());
       if (pathname === '/api/game/set') return send(await setGame(await readJson(req)));
+      if (pathname === '/api/game/login/forget') return send(forgetLogin());
       if (pathname === '/api/game/login') return send(await loginGame(await readJson(req)));
       if (pathname === '/api/game/click') return send(await clickGame(await readJson(req)));
       if (pathname === '/api/autopilot') return send(await pilotSwitch(await readJson(req)));

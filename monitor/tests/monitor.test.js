@@ -987,7 +987,18 @@ test("logs in to the game site with what the admin typed, and says so when the s
   assert.match(bad.error, /still shows its login form/);
   const page = monitor._context().pages().find(p => p.url().includes('/site'));
   assert.deepEqual(await page.evaluate(() => window.sent), {u: 'me', p: 'wrong-pass'});
-  assert.deepEqual(await login({username: 'me', password: 'right-pass'}), {ok: true});
+  assert.deepEqual(await login({username: 'me', password: 'right-pass', remember: true}), {ok: true, saved: true});
+  // Kept encrypted on the server: the page learns the username only, and the file has no plain password.
+  assert.equal((await state()).gameLogin.saved, 'me');
+  const kept = fs.readFileSync(path.join(dir, 'data', 'game-login.json'), 'utf8');
+  assert.ok(!kept.includes('right-pass'));
+  // Logged out in the game: one click logs in again with the saved login.
+  await page.reload();
+  assert.deepEqual(await login({saved: true}), {ok: true, saved: false});
+  assert.deepEqual(await page.evaluate(() => window.sent), {u: 'me', p: 'right-pass'});
+  assert.equal((await post('/api/game/login/forget').then(r => r.json())).ok, true);
+  assert.equal((await state()).gameLogin.saved, '');
+  assert.match((await login({saved: true})).error, /No game login is saved/);
   assert.match((await login({username: 'me', password: 'right-pass'})).error, /No login form|no password box/);
   assert.ok(!JSON.stringify(await state()).includes('right-pass'));
   await post('/api/stop');

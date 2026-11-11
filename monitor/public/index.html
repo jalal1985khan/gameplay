@@ -189,6 +189,7 @@
   .screen img{display:block;width:100%;height:100%;object-fit:contain}
   .live-multiplier{position:absolute;z-index:2;left:12px;top:12px;padding:7px 12px;border-radius:10px;background:#111b;color:#fff;font-size:25px;font-weight:800;text-shadow:0 1px 4px #000;pointer-events:none}
   .live-multiplier[hidden]{display:none}
+  .live-multiplier.stale{background:#7c2d12ed;color:#ffedd5}
   .screen .blank{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;color:var(--muted);font-size:14px}
   .preview p{color:var(--muted);font-size:12px;margin:8px 0 0}
   .preview{max-height:calc(100vh - 32px);overflow:auto}
@@ -411,7 +412,7 @@
           <div class="pair"><span>Today's budget ₹</span><input id="qBudget" type="number" min="100" step="1" required aria-label="Today's budget"></div>
           <div class="pair"><span>Most I accept to lose ₹</span><input id="qLoss" type="number" min="20" step="1" required aria-label="Most I accept to lose"></div>
           <button type="submit" id="qGo">Set up and start</button>
-          <p class="fine">The autopilot works out the bet, the cash-out and a profit target from these two numbers, shows them to you, and starts when you confirm. Or set every value yourself below.</p>
+          <p class="fine">Quick setup uses the same small bet and a steady 1.3× cash-out after every round. The model estimates about 74.6% of rounds reach 1.3×; this is not a prediction or a guarantee, and the game still has a house edge. Review the limits before starting.</p>
           <div class="setmsg bad" id="qMsg"></div>
         </form>
         <div class="pilot" id="pilotBox"></div>
@@ -452,7 +453,7 @@
       <div class="gmsg" id="gMsg"></div>
     </form>
     <div class="screen"><div class="live-multiplier" id="liveMultiplier" hidden aria-live="polite"></div><img id="screen" alt="Live view of the game window" hidden><div class="blank" id="screenBlank">The game window appears here once capture starts.</div></div>
-    <p>A live preview. The multiplier is read from page text, or from the image on macOS and configured Ubuntu servers. Log in and play in that window itself; this view is for watching only.</p>
+    <p>The LIVE multiplier is read separately from the preview image, so it can be ahead of the delayed preview. Its age is shown above; a stale reading is marked. This display does not control cash-out. Log in and play in the game window itself.</p>
 
     <h2 class="results-title"><span>My results <small class="empty">today's tracked bets</small></span><span><a id="betsCsv">Download</a></span></h2>
     <div class="panel results">
@@ -517,6 +518,26 @@
     return c.note || (c.status === 'starting' ? 'Opening the game window…' : 'Not capturing.');
   }
 
+  function renderLiveMultiplier() {
+    if (!state) return;
+    const running = ['starting', 'waiting', 'live'].includes(state.capture.status);
+    const live = state.liveMultiplier, node = $('liveMultiplier');
+    if (live && Number.isFinite(live.value)) {
+      const age = Math.max(0, Date.now() - (Number(live.at) || Date.now()));
+      const stale = age > 1200;
+      node.textContent = `${stale ? 'STALE' : 'LIVE'} ${fmt(live.value)} · ${(age / 1000).toFixed(1)}s`;
+      node.title = `Observation only; read by ${live.method || 'game page text'}; value age ${age} ms. The video preview may lag. This is not used to place or cash out a bet.`;
+      node.setAttribute('aria-label', `${stale ? 'Stale' : 'Live'} game multiplier ${fmt(live.value)}, observation only, read ${age} milliseconds ago`);
+      node.classList.toggle('stale', stale);
+      node.hidden = false;
+    } else {
+      node.textContent = !running ? 'Live multiplier appears when readable' : state.liveMultiplierOcrAvailable === false ? 'Live multiplier image reader unavailable' : 'Reading live multiplier…';
+      node.removeAttribute('aria-label');
+      node.classList.remove('stale');
+      node.hidden = !running;
+    }
+  }
+
   function render() {
     if (!state) return;
     const c = state.capture, running = ['starting', 'waiting', 'live'].includes(c.status);
@@ -534,9 +555,7 @@
     renderResults(); // Not inside renderHelper, which stops early on empty inputs.
     renderAlarm();
     renderScreen(running);
-    const live = state.liveMultiplier, liveNode = $('liveMultiplier');
-    if (live && Number.isFinite(live.value)) { liveNode.textContent = `LIVE ${fmt(live.value)}×`; liveNode.title = `Read by ${live.method || 'game page text'}`; liveNode.hidden = false; }
-    else { liveNode.textContent = !running ? 'Live multiplier appears when readable' : state.liveMultiplierOcrAvailable === false ? 'Live multiplier image reader unavailable' : 'Reading live multiplier…'; liveNode.hidden = !running; }
+    renderLiveMultiplier();
     $('toggle').textContent = running ? 'Stop capture' : 'Start live capture';
     $('toggle').className = running ? 'stop' : '';
     $('toggle').disabled = busy;
@@ -703,6 +722,9 @@
     const a = p.settings, live = state.capture.status === 'live';
     const bet = a.betMode === 'percent' ? `${a.betValue}% of the game balance` : money(a.betValue);
     const after = a.lossAction === 'stop' ? 'stop for today' : `pause ${a.pauseRounds} round${a.pauseRounds > 1 ? 's' : ''}`;
+    const targetInfo = p.on && a.plan !== 'split' && p.target > 1
+      ? `Model estimate: ${(97 / p.target).toFixed(1)}% of rounds reach ${p.target}×. ${a.plan === 'range' ? 'After losses, the higher target is harder to reach; prior losses do not improve the odds.' : 'Each round is independent.'}`
+      : '';
     const status = p.on ? (p.phase === 'waiting' ? 'Waiting for the current bet to finish and the game controls to accept a new bet.' : p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : p.phase === 'adjusting' ? `Changing the bet to ${money(p.stake)} at ${p.target}×…` : a.plan === 'split' ? `Running: ${money(p.stake)} at ${a.minTarget}× and ${money(a.riderBet)} at ${a.maxTarget}×, every round.` : `Running: ${money(p.stake)} this round, cash out at ${p.target}×.${p.debt > 0 ? ` ${money(p.debt)} to win back.` : ''}`)
       : p.day.stopped ? `Done for today: ${p.day.stopped}. ${p.day.final ? 'It can start again tomorrow.' : 'To play more today, raise that limit under Change autopilot settings.'}`
       : live ? 'Off. Nothing is bet until you start it.' : 'Off. Start live capture and open the game first.';
@@ -718,6 +740,7 @@
       </ul>
       <button type="button" id="pilotGo" class="bet${p.on ? ' halt' : ''}"${!p.on && (p.day.stopped || !live) ? ' disabled' : ''}>${p.on ? 'Stop autopilot' : 'Start autopilot'}</button>
       <div class="pstatus ${p.on ? (['paused', 'waiting'].includes(p.phase) ? 'wait' : 'good') : p.day.stopped ? 'bad' : ''}">${status}</div>
+      ${targetInfo ? `<p class="fine" aria-live="polite">${targetInfo}</p>` : ''}
       <div class="ptoday">Autopilot today: <b class="${p.day.net > 0 ? 'good' : p.day.net < 0 ? 'bad' : ''}">${signed(p.day.net)}</b> · ${p.day.rounds} round${p.day.rounds === 1 ? '' : 's'} · ${p.day.minutes} min</div>
       <div class="setmsg bad" id="pilotMsg">${pilotError}</div>
       ${!p.on && p.day.rounds ? '<button type="button" id="pilotNewDay" class="secondary-btn">Start a new day</button>' : ''}
@@ -1307,6 +1330,7 @@
 
   $('url').addEventListener('input', () => { if (localError) { localError = ''; render(); } });
   setInterval(render, 5000); // Keeps "last new round … ago" current.
+  setInterval(renderLiveMultiplier, 200); // Keep the age tag current between server updates.
   // With accounts on: who is signed in, and a view-only page for a viewer.
   fetch('/api/me').then(r => r.json()).then(me => {
     // On a server, an admin can open the real game window (to log in to the game) from here.

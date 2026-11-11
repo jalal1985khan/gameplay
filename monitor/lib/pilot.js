@@ -82,15 +82,16 @@ function replaySummary(values, a, base, options = {}) {
 }
 
 // Settings worked out from two numbers: the day's budget and the most the person accepts to lose.
-// Small equal bets (20 of them fit in the loss limit, and never more than 1% of the budget), the
-// cash-out raised after losses between 1.5× and 3×, a profit target of half the loss limit, and a
-// good day protected once it is half way there.
+// Small equal bets (20 of them fit in the loss limit, and never more than 1% of the budget), a
+// steady 1.3× cash-out (no chasing by raising the target or stake), a profit target of half the
+// loss limit, and a good day protected once it is half way there. This raises the per-bet hit
+// rate, not the expected return: the game still has a house edge and no strategy guarantees profit.
 function autoSettings(budget, loss) {
   budget = Number(budget); loss = Number(loss);
   if (!(budget >= 100) || !(loss >= 20)) return {error: 'Enter a budget of at least ₹100 and a loss limit of at least ₹20.'};
   if (loss > budget) return {error: 'The loss limit cannot be more than the budget.'};
   const bet = Math.max(1, Math.min(Math.floor(loss / 20), Math.floor(budget / 100)));
-  return {settings: {lossLimit: Math.round(loss), profitTarget: Math.max(1, Math.round(loss / 2)), betMode: 'fixed', betValue: bet, plan: 'range', minTarget: 1.5, maxTarget: 3,
+  return {settings: {lossLimit: Math.round(loss), profitTarget: Math.max(1, Math.round(loss / 2)), betMode: 'fixed', betValue: bet, plan: 'single', target: 1.3, minTarget: 1.5, maxTarget: 3,
     maxRounds: 100, maxMinutes: 60, lossStreak: 4, lossAction: 'pause', pauseRounds: 3, recover: false, protect: true}};
 }
 

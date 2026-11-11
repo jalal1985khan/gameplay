@@ -5,7 +5,8 @@
   if (window.__aviatorCapture) return;
   window.__aviatorCapture = true;
 
-  let scanTimer = 0, strip = null, lastKey = null, multiplierTimer = 0;
+  let scanTimer = 0, strip = null, lastKey = null, multiplierTimer = 0, liveNode = null;
+  let liveMutations = [];
   const seen = new WeakSet();
 
   // A multiplier label such as "2.15x", "x1,204.50" or "1.00". It needs the x/× marker or exactly
@@ -54,27 +55,62 @@
 
   // Read a text-rendered live multiplier when the provider exposes it in the DOM. Canvas-only
   // games need provider-specific OCR and cannot be read reliably from page text.
-  function scanLiveMultiplier() {
+  function liveCandidate(el) {
+    if (!el || el.children.length || (strip && strip.contains(el)) || !visible(el)) return null;
+    const text = el.textContent.trim();
+    if (!text || text.length > 18) return null;
+    const r = read(text);
+    if (!r || !r.marked) return null;
+    const style = getComputedStyle(el), size = parseFloat(style.fontSize) || 0;
+    if (size < 20) return null;
+    const box = el.getBoundingClientRect();
+    const cx = (box.left + box.right) / 2 / Math.max(1, innerWidth);
+    const cy = (box.top + box.bottom) / 2 / Math.max(1, innerHeight);
+    if (cx < 0.2 || cx > 0.85 || cy < 0.15 || cy > 0.9) return null;
+    return {el, value: r.n, score: size + (1 - Math.abs(cx - 0.55)) * 8 + (1 - Math.abs(cy - 0.55)) * 5};
+  }
+  function scanLiveMultiplier(mutations = []) {
     multiplierTimer = 0;
     if (!document.body || typeof window.__aviatorLive !== 'function') return;
-    let best = null, score = 0;
-    for (const el of document.body.querySelectorAll('body *')) {
-      if (el.children.length || !visible(el) || (strip && strip.contains(el))) continue;
-      const r = read(el.textContent);
-      if (!r || !r.marked) continue;
-      const style = getComputedStyle(el), size = parseFloat(style.fontSize) || 0;
-      if (size < 20) continue;
-      const box = el.getBoundingClientRect();
-      const cx = (box.left + box.right) / 2 / Math.max(1, innerWidth);
-      const cy = (box.top + box.bottom) / 2 / Math.max(1, innerHeight);
-      if (cx < 0.2 || cx > 0.85 || cy < 0.15 || cy > 0.9) continue;
-      const candidate = size + (1 - Math.abs(cx - 0.55)) * 8 + (1 - Math.abs(cy - 0.55)) * 5;
-      if (candidate > score) { best = r.n; score = candidate; }
+    const candidates = new Set();
+    const addText = node => {
+      if (!node) return;
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.parentElement) candidates.add(node.parentElement);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) if (text.parentElement) candidates.add(text.parentElement);
+    };
+    if (!mutations.length && !liveNode) {
+      // One initial discovery scan. After this, inspect only nodes the game mutates.
+      addText(document.body);
+    } else {
+      if (liveNode && !liveNode.isConnected) liveNode = null;
+      for (const mutation of mutations) {
+        if (mutation.type === 'characterData') addText(mutation.target);
+        else for (const node of mutation.addedNodes) addText(node);
+        if (liveNode && (mutation.target === liveNode || liveNode.contains(mutation.target))) candidates.add(liveNode);
+      }
     }
-    window.__aviatorLive({value: best}).catch(() => {});
+    if (!candidates.size) return;
+    let best = null;
+    for (const el of candidates) {
+      const candidate = liveCandidate(el);
+      if (candidate && (!best || candidate.score > best.score)) best = candidate;
+    }
+    const changedLiveNode = liveNode && candidates.has(liveNode);
+    if (best) liveNode = best.el;
+    else if (changedLiveNode || (liveNode && !liveNode.isConnected)) liveNode = null;
+    if (best || changedLiveNode) window.__aviatorLive({value: best ? best.value : null}).catch(() => {});
   }
   const queueLiveMultiplier = () => {
-    if (!multiplierTimer) multiplierTimer = setTimeout(scanLiveMultiplier, 75);
+    if (!multiplierTimer) multiplierTimer = setTimeout(() => {
+      const pending = liveMutations;
+      liveMutations = [];
+      scanLiveMultiplier(pending);
+    }, 50);
   };
   // For the monitor's diagnostics: every list in this frame that looks like results.
   window.__aviatorCandidates = () => {
@@ -149,8 +185,9 @@
   const queueScan = () => { if (!scanTimer) scanTimer = setTimeout(scan, 500); };
 
   const start = () => {
-    new MutationObserver(() => {
+    new MutationObserver(mutations => {
       queueScan();
+      liveMutations.push(...mutations);
       queueLiveMultiplier();
       if (!panelTimer) panelTimer = setTimeout(() => { panelTimer = 0; readPanel(); }, 75);
     }).observe(document.documentElement, {subtree: true, childList: true, characterData: true});

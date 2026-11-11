@@ -9,6 +9,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const {spawn} = require('child_process');
+const {execFileSync} = require('child_process');
 const AviatorMatch = require('./lib/match.js');
 const Analysis = require('./lib/analysis.js');
 const {createStore, atomicWrite} = require('./lib/store.js');
@@ -380,7 +381,13 @@ function createMonitor({
   let roundLow = null, openRound = null;
   let liveMultiplier = {value: null, at: 0, source: '', method: 'page text'};
   let visionMultiplier = {value: null, at: 0, source: '', method: 'on-screen OCR'};
-  let ocrProcess = null, ocrBuffer = '', ocrPending = null, ocrBusy = false, ocrLastQueuedAt = 0, ocrTimer = null, ocrSupported = process.platform === 'darwin' || process.platform === 'linux';
+  let ocrProcess = null, ocrBuffer = '', ocrPending = null, ocrBusy = false, ocrLastQueuedAt = 0, ocrTimer = null;
+  // Report the image reader as available only when its executable can actually start. On Linux,
+  // a missing Tesseract binary otherwise leaves the UI saying "Reading live multiplier…" forever.
+  let ocrSupported = process.platform === 'darwin' || (process.platform === 'linux' && (() => {
+    try { execFileSync('tesseract', ['--version'], {stdio: 'ignore', timeout: 1500}); return true; }
+    catch { return false; }
+  })());
   let capture = {status: 'stopped', note: '', url: '', startedAt: 0, lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false};
   let context = null, stopping = false;
   // One lock for everything that types or clicks in the game, so two actions never overlap.
@@ -401,12 +408,29 @@ function createMonitor({
   };
   let lastFrameAt = 0, grabbing = false;
   function applyOcrValue(value) {
+    // A fresh value from the game DOM is both faster and more precise than OCR. Do not let a
+    // delayed OCR frame overwrite the value from a newer text mutation.
+    if (liveMultiplier.value !== null && Date.now() - liveMultiplier.at < 1000) return;
+    const now = Date.now();
+    const shouldBroadcast = visionMultiplier.value !== value || now - visionMultiplier.at >= 500;
     const next = Number.isFinite(value)
-      ? {value, at: Date.now(), source: capture.source || '', method: 'on-screen OCR'}
-      : {value: null, at: Date.now(), source: capture.source || '', method: 'on-screen OCR'};
+      ? {value, at: now, source: capture.source || '', method: 'on-screen OCR'}
+      : {value: null, at: now, source: capture.source || '', method: 'on-screen OCR'};
     const changed = visionMultiplier.value !== next.value || visionMultiplier.source !== next.source;
     visionMultiplier = next;
-    if (changed) broadcast();
+    if (changed || shouldBroadcast) broadcast();
+  }
+  function applyLiveTextValue(value, source = '') {
+    if (Number.isFinite(value) && value >= 1 && value <= 1000000) {
+      const now = Date.now();
+      const changed = liveMultiplier.value !== value || liveMultiplier.source !== source;
+      const shouldBroadcast = now - liveMultiplier.at >= 500;
+      liveMultiplier = {value, at: now, source, method: 'page text'};
+      if (changed || shouldBroadcast) broadcast();
+    } else if (liveMultiplier.source === source && liveMultiplier.value !== null) {
+      liveMultiplier = {value: null, at: Date.now(), source, method: 'page text'};
+      broadcast();
+    }
   }
   function parseTesseractTsv(text) {
     let best = null;
@@ -473,6 +497,10 @@ function createMonitor({
   }
   function queueOcrFrame(jpeg) {
     if (!ocrSupported || viewers.size === 0) return;
+    // Prefer the inexpensive live DOM value whenever it is fresh. Image OCR is only needed for
+    // providers that draw the central multiplier into a canvas, and can otherwise steal CPU from
+    // Chrome's game renderer on small virtual servers.
+    if (liveMultiplier.value !== null && Date.now() - liveMultiplier.at < 1000) return;
     ocrPending = jpeg; // Keep only the newest frame if OCR is behind.
     if (process.platform === 'darwin') startVisionOcr();
     const wait = Math.max(0, 180 - (Date.now() - ocrLastQueuedAt));
@@ -700,14 +728,7 @@ function createMonitor({
     await ctx.exposeBinding('__aviatorPanel', (_src, p) => onPanel(p));
     await ctx.exposeBinding('__aviatorLive', (src, p) => {
       let source = ''; try { source = new URL(src.frame ? src.frame.url() : '').host; } catch {}
-      if (p && Number.isFinite(p.value) && p.value >= 1 && p.value <= 1000000) {
-        const changed = liveMultiplier.value !== p.value || liveMultiplier.source !== source;
-        liveMultiplier = {value: p.value, at: Date.now(), source, method: 'page text'};
-        if (changed) broadcast();
-      } else if (liveMultiplier.source === source && liveMultiplier.value !== null) {
-        liveMultiplier = {value: null, at: Date.now(), source, method: 'page text'};
-        broadcast();
-      }
+      applyLiveTextValue(p && p.value, source);
     });
     await ctx.addInitScript({path: STAY_VISIBLE_SCRIPT});
     await ctx.addInitScript({path: CAPTURE_SCRIPT});
@@ -1802,6 +1823,8 @@ function createMonitor({
       await closed;
     },
     state, start, stop,
+    _applyOcrValue: applyOcrValue, // For tests: exercise stale OCR protection without a live game.
+    _applyLiveTextValue: applyLiveTextValue, // For tests.
     _context: () => context, // For tests.
     _pilotNewDay: () => { pilotCfg.day = null; }, // For tests.
   };

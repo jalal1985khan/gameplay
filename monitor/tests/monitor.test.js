@@ -21,7 +21,7 @@ const PANEL = `<div class="userBalance"><span class="userBalanceText">balance :<
   <div class="betSectionBlock"><input class="betSectionInput" value="2"><button class="betButton start"><span class="betTitle">bet</span></button>
   <div class="autoPlayContainer"><button class="autoPlayButton auto"><span class="autoPlayButtonLabel">auto play</span></button>
   <div class="autoCashOut"><div class="forAvi switcher" style="width:30px;height:16px"></div><input class="autoPlayTagInput" value="2" disabled></div></div></div>`;
-const GAME = `<!doctype html><body>${PANEL}<div id="flying">1.37x</div><div id="list"></div><script>
+const GAME = `<!doctype html><style>#flying{position:fixed;left:50%;top:50%;font-size:24px}</style><body>${PANEL}<div id="flying">1.37x</div><div id="list"></div><script>
   const list = document.getElementById('list');
   const add = v => { const d = document.createElement('div'); d.textContent = v.toFixed(2) + 'x'; list.prepend(d); while (list.children.length > 20) list.lastChild.remove(); };
   [1.20, 3.45, 1.00, 12.30, 2.05, 1.71].forEach(add);
@@ -93,6 +93,8 @@ test('captures rounds from a cross-origin game iframe, in order, live', async ()
   const s = await until(state, s => s.count >= 11);
   ac.abort();
   assert.equal(s.capture.status, 'live');
+  assert.equal(s.liveMultiplier?.value, 1.37, 'reads a large center-screen multiplier directly from text');
+  assert.equal(s.liveMultiplier?.method, 'page text');
   // Oldest first: the six already shown (added 1.20 first), then the five that arrived while watching.
   const values = s.recent.map(x => x.v).reverse();
   assert.deepEqual(values, [1.2, 3.45, 1, 12.3, 2.05, 1.71, 4.44, 1.08, 2.5, 1.99, 7.77]);
@@ -100,6 +102,12 @@ test('captures rounds from a cross-origin game iframe, in order, live', async ()
   assert.equal(s.latest, 7.77);
   // The page's event stream carried the live updates.
   assert.ok(events.join('').includes('"latest":7.77'));
+  const frame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
+  const changedAt = Date.now();
+  await frame.evaluate(() => { document.getElementById('flying').textContent = '2.41x'; });
+  const live = await until(state, x => x.liveMultiplier?.value === 2.41, 1200);
+  assert.equal(live.liveMultiplier?.value, 2.41, 'updates the overlay promptly when the center multiplier changes');
+  assert.ok(Date.now() - changedAt < 1200, 'does not wait for a full-page polling cycle');
   // CSV export has every round.
   const csv = await (await fetch(base + '/export.csv')).text();
   assert.equal(csv.trim().split('\n').length, 12);
@@ -801,7 +809,7 @@ test('autopilot: starts the game\'s Auto Play with the set bet, pauses after los
   await until(playing, v => v === true);
   assert.equal(st.autopilot.day.rounds, 2, 'the round it sat out is not counted');
 
-  // A win, then losses down to the limit: stopped for the day, Auto Play off, no restart.
+  // A win, then losses: stop before the next full bet could reach the loss limit.
   await balance(970);
   await balance(990);
   await round(2.5);
@@ -810,20 +818,12 @@ test('autopilot: starts the game\'s Auto Play with the set bet, pauses after los
   await balance(980);
   await round(1.1);
   await until(state, s => s.autopilot.day.net === -20);
-  // A second loss in a row pauses again at −30; after the pause one more loss reaches the limit.
+  // At −30, another ₹10 bet would reach the ₹40 limit, so stop before placing it.
   await balance(970);
   await round(1.3);
-  st = await until(state, s => s.autopilot.phase === 'paused');
-  assert.equal(st.autopilot.day.net, -30);
-  await until(playing, v => v === false);
-  await round(4);
-  await until(state, s => s.autopilot.phase === 'running');
-  await until(playing, v => v === true);
-  await balance(960);
-  await round(1.05);
   st = await until(state, s => !s.autopilot.on);
-  assert.equal(st.autopilot.day.net, -40);
-  assert.match(st.autopilot.day.stopped, /loss limit of ₹40/);
+  assert.equal(st.autopilot.day.net, -30);
+  assert.match(st.autopilot.day.stopped, /next bet could reach the loss limit of ₹40/);
   await until(playing, v => v === false);
   assert.match((await pilot({on: true})).error, /done for today/);
   // Ended by the loss limit: raising the limits does not open the day again.
@@ -971,7 +971,7 @@ test('autopilot plans: cash-out raised after losses within a range; and a split 
   await until(state, s => s.session.game.slots.length === 1);
   // Quick setup from two numbers, and the replay asks for enough captured rounds.
   const auto = await post('/api/autopilot/auto', {budget: 1000, loss: 100}).then(r => r.json());
-  assert.deepEqual([auto.ok, auto.settings.lossLimit, auto.settings.profitTarget, auto.settings.betValue, auto.settings.plan, auto.settings.protect], [true, 100, 50, 5, 'range', true]);
+  assert.deepEqual([auto.ok, auto.settings.lossLimit, auto.settings.profitTarget, auto.settings.betValue, auto.settings.plan, auto.settings.target, auto.settings.protect], [true, 100, 50, 5, 'single', 1.3, true]);
   assert.match((await post('/api/autopilot/auto', {budget: 100, loss: 500}).then(r => r.json())).error, /cannot be more than the budget/);
   assert.match((await fetch(base + '/api/autopilot/replay').then(r => r.json())).error, /at least 200 rounds/);
   await setup({plan: 'single', protect: false});

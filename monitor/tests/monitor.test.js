@@ -824,6 +824,9 @@ test('autopilot: starts the game\'s Auto Play with the set bet, pauses after los
   assert.match(st.autopilot.day.stopped, /loss limit of ₹40/);
   await until(playing, v => v === false);
   assert.match((await pilot({on: true})).error, /done for today/);
+  // Ended by the loss limit: raising the limits does not open the day again.
+  assert.equal((await setup({lossLimit: 1000, maxRounds: 500})).reopened, false);
+  assert.match((await pilot({on: true})).error, /start again tomorrow/);
   assert.ok(st.autopilot.log.some(l => /Stopped for today/.test(l.text)));
   await balance(1000);
 });
@@ -832,6 +835,7 @@ test('autopilot, win back losses: the bet grows after a loss up to its cap and r
   monitor._pilotNewDay();
   const gameFrame = monitor._context().pages()[0].frames().find(f => f.url().includes('/game'));
   const pilot = body => post('/api/autopilot', body).then(r => r.json());
+  const setup = body => post('/api/autopilot/settings', body).then(r => r.json());
   const round = async v => {
     const before = (await state()).count;
     await gameFrame.evaluate(x => { const d = document.createElement('div'); d.textContent = x.toFixed(2) + 'x'; document.getElementById('list').prepend(d); }, v);
@@ -865,6 +869,21 @@ test('autopilot, win back losses: the bet grows after a loss up to its cap and r
   st = await state();
   assert.deepEqual([st.autopilot.debt, st.autopilot.stake, st.autopilot.day.net, st.autopilot.day.rounds], [0, 10, 0, 3]);
   assert.ok(st.autopilot.log.some(l => /to win back: next bet ₹30,/.test(l.text)));
+  // A round limit ends the day; raising it opens the day again.
+  assert.equal((await pilot({on: false})).ok, true);
+  await until(() => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active')), v => v === false);
+  assert.equal((await setup({maxRounds: 4})).ok, true);
+  assert.equal((await pilot({on: true})).ok, true);
+  await betting(10);
+  await balance(990);
+  await round(1.1);
+  st = await until(state, s => !s.autopilot.on);
+  assert.match(st.autopilot.day.stopped, /4 rounds were played/);
+  assert.equal(st.autopilot.day.final, false);
+  assert.match((await pilot({on: true})).error, /Raise that limit/);
+  assert.equal((await setup({maxRounds: 4})).reopened, false, 'still at the limit');
+  assert.equal((await setup({maxRounds: 10})).reopened, true);
+  assert.equal((await pilot({on: true})).ok, true);
   assert.equal((await pilot({on: false})).ok, true);
   await until(() => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active')), v => v === false);
   await balance(1000);

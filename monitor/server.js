@@ -1121,7 +1121,7 @@ function createMonitor({
     const day = pilotDay();
     return {on: pilot.on, phase: pilot.phase, stake: pilot.stake, target: pilot.target, debt: pilot.debt, note: pilot.note, log: pilot.log,
       pauseLeft: pilot.phase === 'paused' ? Math.max(0, pilot.pauseUntil - seen) : 0,
-      day: {net: day.net, rounds: day.rounds, minutes: Math.floor(day.ms / 60000), stopped: day.stopped},
+      day: {net: day.net, rounds: day.rounds, minutes: Math.floor(day.ms / 60000), stopped: day.stopped, final: !!day.stopped && !['rounds', 'minutes', 'profit', 'kept', 'streak'].includes(day.stoppedKind)},
       settings: pilotCfg.settings};
   }
   function saveAutopilot(input = {}) {
@@ -1153,9 +1153,24 @@ function createMonitor({
     a.minTarget = round2(a.minTarget);
     a.maxTarget = round2(a.maxTarget);
     pilotCfg.settings = a;
+    // Done for today because of a round, time, profit or losses-in-a-row limit, and that limit
+    // is now raised: the day opens again. A day ended by the loss limit or the day's stop-loss
+    // stays closed whatever is changed, so the money limit can't be moved after reaching it.
+    const day = pilotDay();
+    let reopened = false;
+    if (day.stopped && ['rounds', 'minutes', 'profit', 'kept', 'streak'].includes(day.stoppedKind)) {
+      const roundCost = round2((a.betMode === 'percent' ? 1 : a.betValue) + (a.plan === 'split' ? a.riderBet : 0));
+      const still = Pilot.stopReason({...a, protect: day.stoppedKind === 'kept' ? false : a.protect}, {net: day.net, rounds: day.rounds, ms: day.ms, streak: day.stoppedKind === 'streak' && a.lossAction === 'stop' ? pilot.streak : 0, peak: day.peak || 0, roundCost});
+      if (!still) {
+        day.stopped = ''; day.stoppedKind = '';
+        pilot.streak = 0;
+        reopened = true;
+        pilotSay('Limits raised: the autopilot can start again today.');
+      }
+    }
     savePilot();
     broadcast();
-    return {ok: true, settings: a};
+    return {ok: true, settings: a, reopened};
   }
   // The bets of one round. Split plan: a secure part on bet 1 at the lowest cash-out and a rider
   // on bet 2 at the highest. Otherwise one bet on bet 1.
@@ -1189,10 +1204,10 @@ function createMonitor({
     pilot.engagedAt = Date.now();
     return r;
   }
-  async function pilotStop(reason, forToday) {
+  async function pilotStop(reason, forToday, kind = '') {
     pilot.on = false;
     pilot.phase = 'off';
-    if (forToday) pilotDay().stopped = reason;
+    if (forToday) { pilotDay().stopped = reason; pilotDay().stoppedKind = kind; }
     pilotSay(forToday ? `Stopped for today: ${reason}.` : `Autopilot off: ${reason}.`);
     savePilot();
     pilot.needCut = true;
@@ -1209,7 +1224,7 @@ function createMonitor({
     }
     if (pilot.on) return {ok: true, autopilot: pilotState()};
     const a = pilotCfg.settings, day = pilotDay();
-    if (day.stopped) return fail(`The autopilot is done for today (${day.stopped}). It can start again tomorrow.`);
+    if (day.stopped) return fail(`The autopilot is done for today (${day.stopped}). ${['rounds', 'minutes', 'profit', 'kept', 'streak'].includes(day.stoppedKind) ? 'Raise that limit in its settings to play more today.' : 'It can start again tomorrow.'}`);
     if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
     const slot = panel && panel.slots[0], balance = panel ? panel.balance : null;
     if (!slot || balance === null) return fail("The game's bet panel or balance is not on screen yet.");
@@ -1305,7 +1320,7 @@ function createMonitor({
       const roundCost = round2(pilot.base + (a.plan === 'split' ? a.riderBet : 0));
       const why = Pilot.stopReason(a, {net: day.net, rounds: day.rounds, ms: day.ms, streak: pilot.streak, peak: day.peak || 0, roundCost});
       const stop = why ? why.text : sessionState().stopped ? "the day's stop-loss was reached" : '';
-      if (stop) { await pilotStop(stop, true); return; }
+      if (stop) { await pilotStop(stop, true, why ? why.kind : 'stoploss'); return; }
       const playing = pilotLegs().every(l => !!(panel && panel.slots[l.slot] && panel.slots[l.slot].autoPlay === true));
       if (pilot.phase === 'running' && pilot.streak >= a.lossStreak) {
         pilot.phase = 'paused';

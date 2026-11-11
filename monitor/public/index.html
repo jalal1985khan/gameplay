@@ -699,7 +699,7 @@
     const bet = a.betMode === 'percent' ? `${a.betValue}% of the game balance` : money(a.betValue);
     const after = a.lossAction === 'stop' ? 'stop for today' : `pause ${a.pauseRounds} round${a.pauseRounds > 1 ? 's' : ''}`;
     const status = p.on ? (p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : p.phase === 'adjusting' ? `Changing the bet to ${money(p.stake)} at ${p.target}×…` : a.plan === 'split' ? `Running: ${money(p.stake)} at ${a.minTarget}× and ${money(a.riderBet)} at ${a.maxTarget}×, every round.` : `Running: ${money(p.stake)} this round, cash out at ${p.target}×.${p.debt > 0 ? ` ${money(p.debt)} to win back.` : ''}`)
-      : p.day.stopped ? `Done for today: ${p.day.stopped}. It can start again tomorrow.`
+      : p.day.stopped ? `Done for today: ${p.day.stopped}. ${p.day.final ? 'It can start again tomorrow.' : 'To play more today, raise that limit under Change autopilot settings.'}`
       : live ? 'Off. Nothing is bet until you start it.' : 'Off. Start live capture and open the game first.';
     const html = `<ul class="plist">
         <li>Each round: ${a.plan === 'split' ? `<b>${bet}</b> cashing out at <b>${a.minTarget}×</b>, plus <b>${money(a.riderBet)}</b> riding to <b>${a.maxTarget}×</b>`
@@ -809,6 +809,7 @@
     if (!r.ok) { $('pilotError').textContent = r.error; $('pilotError').hidden = false; return; }
     pilotError = '';
     $('pilotDlg').close();
+    if (r.reopened) alert('The limit that ended the day is raised: you can start the autopilot again today.');
   });
 
   function renderHelper() {

@@ -639,6 +639,9 @@ function createMonitor({
       patch.lastRoundAt = now;
     }
     setCapture(patch);
+    // A missed result cannot be safely counted toward the daily loss limit. Stop automation
+    // and cancel any queued wagers rather than continuing with an understated net total.
+    if (liveGap && pilot.on) void pilotStop('round results were missed; verify the game balance before restarting', false);
     void maybeAutoCutOff();
     void pilotTick().catch(e => { pilot.on = false; pilot.needCut = true; pilotSay('Autopilot stopped after an internal error. Check the game window.'); console.error(e.message); });
   }

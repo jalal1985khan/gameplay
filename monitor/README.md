@@ -168,6 +168,8 @@ server's public folder (such as `/var/www`); the script refuses to continue ther
 
 Autopilot responds to control changes and checks again every 250 ms. If a bet is pending, in flight, or disabled it shows Waiting and starts only when the slot is available. It verifies the amount and Auto Cash Out before enabling Auto Play and refuses to adopt active settings that differ. It stops before the next full bet could reach the loss limit, accounting for the actual recovery stake. A wager already in flight can still settle after a stop is requested, so the configured limit is not a guaranteed exact ceiling. This improves execution reliability, not the probability of winning. No historical pattern is used to select a winning round. Actual game acceptance and network latency remain outside the monitor's control.
 
+If live round capture detects a gap, autopilot stops and tries to disable Auto Play and cancel queued bets; check the game balance and round history before restarting because missed outcomes cannot be reconstructed reliably.
+
 Stale capture stops autopilot and attempts to disable the game's Auto Play. New bets remain blocked while capture is stale. A failed data write locks betting until storage is repaired and the monitor is restarted. A failed stop attempt still requires checking the actual game window.
 
 Invalid JSON bodies return errors instead of crashing the server. Corrupt or missing configured account databases lock access. Password replacement revokes old sessions; logout closes live streams immediately, and other account changes are checked at one-second intervals. Slow video clients drop outdated frames; slow event clients disconnect and can reconnect.

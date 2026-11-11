@@ -46,8 +46,11 @@ function createStore(dataDir, maxRounds) {
       fs.appendFileSync(logFile(origin), fresh.map((v, i) => JSON.stringify(gap && i === 0 ? {t: now, v, g: 1} : {t: now, v})).join('\n') + '\n');
     } catch {}
   }
+  // The log is set aside under a dated name rather than deleted, so a mistaken Clear can be undone
+  // by renaming the file back.
   function clear(origin) {
-    try { fs.rmSync(logFile(origin), {force: true}); } catch {}
+    const file = logFile(origin);
+    try { if (fs.statSync(file).size) fs.renameSync(file, file.replace(/\.ndjson$/, `.cleared-${new Date().toISOString().replace(/[:.]/g, '-')}.ndjson`)); } catch {}
   }
 
   // The site captured last, so its rounds are shown again when the monitor starts.

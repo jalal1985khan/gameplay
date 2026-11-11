@@ -17,7 +17,7 @@ npm start        # opens http://localhost:4321
 1. Paste your game's address (for example `https://your-site.example/aviator`) and click **Start live capture**.
 2. A separate Chrome window opens on that address. Log in there as usual and open the Aviator game.
 3. Finished rounds appear on the monitor page as they happen: count, latest, median, share that reached 2×, and the newest 200 rounds.
-4. **Stop capture** closes the game window. Rounds are kept (and saved in `data/`) until you click **Clear**. **Download CSV** exports them.
+4. **Stop capture** closes the game window. Rounds are kept and saved in `data/rounds/`; the page has no button that deletes them. **Download CSV** exports them. `POST /api/clear` empties the list and sets the log aside as `<site>.cleared-<date>.ndjson`, so it can be renamed back.
 
 The right side of the monitor shows a live view of the game window, so you can watch the game there.
 The game keeps running when you switch tabs or put other windows on top of it (the game page is

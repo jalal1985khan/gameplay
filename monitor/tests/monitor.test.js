@@ -503,9 +503,11 @@ test('a monitor started again reads its rounds back from the log; a live game th
   } finally { await again.close(); }
 });
 
-test('clear empties the history', async () => {
+test('clear empties the history, and keeps the rounds aside in a dated file', async () => {
   await post('/api/clear');
   assert.equal((await state()).count, 0);
+  const files = fs.readdirSync(path.join(dir, 'data', 'rounds'));
+  assert.ok(files.some(f => /\.cleared-.*\.ndjson$/.test(f)), files.join(', '));
 });
 
 test('never records betting odds; records the x-marked Aviator list once it appears', async () => {

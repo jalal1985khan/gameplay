@@ -887,10 +887,12 @@ test('autopilot, win back losses: the bet grows after a loss up to its cap and r
   st = await until(state, s => !s.autopilot.on);
   assert.match(st.autopilot.day.stopped, /4 rounds were played/);
   assert.equal(st.autopilot.day.final, false);
+  await until(() => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active')), v => v === false);
   assert.match((await pilot({on: true})).error, /Raise that limit/);
   assert.equal((await setup({maxRounds: 4})).reopened, false, 'still at the limit');
   assert.equal((await setup({maxRounds: 10})).reopened, true);
-  assert.equal((await pilot({on: true})).ok, true);
+  const again = await pilot({on: true});
+  assert.equal(again.ok, true, again.error);
   assert.equal((await pilot({on: false})).ok, true);
   await until(() => gameFrame.evaluate(() => document.querySelector('.autoPlayButton').classList.contains('active')), v => v === false);
   await balance(1000);

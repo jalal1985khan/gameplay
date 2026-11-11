@@ -87,7 +87,7 @@ fi
 step "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates gnupg xvfb x11vnc novnc websockify >/dev/null
+apt-get install -y -qq curl ca-certificates gnupg xvfb x11vnc novnc websockify tesseract-ocr >/dev/null
 ok "Virtual screen, VNC and noVNC"
 
 node_major() { command -v node >/dev/null 2>&1 && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }

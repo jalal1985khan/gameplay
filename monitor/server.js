@@ -1,7 +1,7 @@
 // Aviator Live Monitor: a small local server with one page. You enter the game URL and click
 // Start live capture; it opens the game in a real browser window where you log in as usual,
 // reads each finished round from the game's results list, and streams it to the monitor page.
-// It listens on this computer only (127.0.0.1) and never reads or stores game logins. To share it,
+// It listens on this computer only (127.0.0.1); admins can explicitly save game logins. To share it,
 // a web server in front passes requests on under MONITOR_PUBLIC_HOST; that works only once
 // accounts exist (node users.js add ...), and everyone then has to sign in.
 const http = require('http');
@@ -14,6 +14,7 @@ const Analysis = require('./lib/analysis.js');
 const {createStore, atomicWrite} = require('./lib/store.js');
 const {createAuth} = require('./lib/auth.js');
 const Pilot = require('./lib/pilot.js');
+const {engagementState} = require('./lib/execution.js');
 const crypto = require('crypto');
 
 // Rounds kept in memory for the page and the analysis; the log on disk keeps every round.
@@ -28,6 +29,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const STATIC = {'/analysis.js': 'text/javascript; charset=utf-8'};
 const CAPTURE_SCRIPT = path.join(__dirname, 'lib', 'capture.js');
 const STAY_VISIBLE_SCRIPT = path.join(__dirname, 'lib', 'stay-visible.js');
+const VISION_OCR_SCRIPT = path.join(__dirname, 'lib', 'vision-ocr.swift');
 // Chrome slows or freezes pages in hidden tabs and covered windows; the game must keep running.
 const KEEP_RUNNING_ARGS = [
   '--disable-background-timer-throttling',
@@ -51,6 +53,21 @@ function createMonitor({
   publicHost = '', // The name the monitor is shared under (e.g. monitor.example.com), behind a web server.
   staleMs = 180000, // Live, but the results list unread for this long: the game has stopped updating.
 } = {}) {
+  let persistenceError = '';
+  function persist(write) {
+    try { return write(); }
+    catch (e) {
+      persistenceError = 'Saving data failed. Betting is locked until storage is repaired and the monitor is restarted.';
+      console.error('Monitor persistence failure:', e.code || e.message);
+      return undefined;
+    }
+  }
+  function audit(event) {
+    persist(() => {
+      fs.mkdirSync(dataDir, {recursive: true});
+      fs.appendFileSync(path.join(dataDir, 'actions.ndjson'), JSON.stringify({at: Date.now(), ...event}) + '\n', {mode: 0o600});
+    });
+  }
   const store = createStore(dataDir, MAX_ROUNDS);
   // Captured rounds, oldest first; gaps are indexes where rounds were missed before that round.
   // Each game site has its own log; the site captured last is shown when the monitor starts.
@@ -78,7 +95,7 @@ function createMonitor({
     if (input.remindMinutes !== undefined && !REMIND_CHOICES.includes(Number(input.remindMinutes))) return {ok: false, error: 'Pick one of the reminder options.'};
     if (input.alarmSound !== undefined) settings.alarmSound = input.alarmSound === true;
     if (input.remindMinutes !== undefined) settings.remindMinutes = Number(input.remindMinutes);
-    try { atomicWrite(settingsFile, JSON.stringify(settings)); } catch {}
+    persist(() => atomicWrite(settingsFile, JSON.stringify(settings)));
     broadcast();
     void maybeAutoCutOff();
     return {ok: true};
@@ -95,7 +112,7 @@ function createMonitor({
     }
   } catch {}
   const saveSession = () => {
-    try { atomicWrite(sessionFile, JSON.stringify({...session, seen})); } catch {}
+    persist(() => atomicWrite(sessionFile, JSON.stringify({...session, seen})));
   };
 
   function sessionState() {
@@ -110,7 +127,7 @@ function createMonitor({
     const balanceStart = session.balanceStart ?? null;
     const realNet = balance !== null && balanceStart !== null ? Math.round((balance - balanceStart) * 100) / 100 : null;
     const realStopped = realNet !== null && -realNet >= stopLoss;
-    const stopped = -net >= stopLoss || realStopped;
+    const stopped = !!persistenceError || -net >= stopLoss || realStopped;
     const done = session.bets.filter(b => b.result === 'won' || b.result === 'lost');
     // The game's own Auto Bet is on: every finished round is recorded as a bet.
     const autoBet = session.autoBet || null;
@@ -167,7 +184,7 @@ function createMonitor({
     stake = Math.round(Number(stake) * 100) / 100;
     target = Math.round(Number(target) * 100) / 100;
     const st = sessionState();
-    if (!(stake > 0) || !(target > 1 && target <= 1000)) return {ok: false, error: 'Enter a bet above ₹0 and a cash-out above 1×.'};
+    if (!(Number.isFinite(stake) && stake > 0) || !(target > 1 && target <= 1000)) return {ok: false, error: 'Enter a bet above ₹0 and a cash-out above 1×.'};
     if (capture.status !== 'live') return {ok: false, error: 'Start live capture and open the game first, so the result can be checked.'};
     if (st.stopped) return {ok: false, error: 'Stop-loss reached. You are done for today.'};
     if (st.pending) return {ok: false, error: 'Your last bet is still waiting for its round.'};
@@ -195,7 +212,7 @@ function createMonitor({
     stake = Math.round(Number(stake) * 100) / 100;
     target = Math.round(Number(target) * 100) / 100;
     const st = sessionState();
-    if (!(stake > 0) || !(target > 1 && target <= 1000)) return {ok: false, error: 'Enter a bet above ₹0 and a cash-out above 1×.'};
+    if (!(Number.isFinite(stake) && stake > 0) || !(target > 1 && target <= 1000)) return {ok: false, error: 'Enter a bet above ₹0 and a cash-out above 1×.'};
     if (capture.status !== 'live') return {ok: false, error: 'Start live capture and open the game first, so every round can be checked.'};
     if (st.stopped) return {ok: false, error: 'Stop-loss reached. You are done for today.'};
     if (st.pending || st.awaiting) return {ok: false, error: 'Finish your last bet first.'};
@@ -248,7 +265,7 @@ function createMonitor({
 
   function resetSession(budget) {
     budget = Math.round(Number(budget));
-    if (!(budget > 0)) return {ok: false, error: 'Enter the money you are ready to lose today.'};
+    if (!(Number.isFinite(budget) && budget > 0)) return {ok: false, error: 'Enter the money you are ready to lose today.'};
     archiveDay();
     session = newSession(budget);
     session.balanceStart = panel ? panel.balance : null;
@@ -263,12 +280,12 @@ function createMonitor({
   function archiveDay() {
     const st = sessionState();
     if (!st.bets) return;
-    store.addDay({
+    persist(() => store.addDay({
       startedAt: session.startedAt, endedAt: Date.now(), site: history.origin, budget: st.budget, stopLoss: st.stopLoss,
       bets: st.bets, wins: st.wins, losses: st.losses, wagered: st.wagered, net: Math.round(st.net * 100) / 100, realNet: st.realNet,
       practice: session.bets.filter(b => b.practice).length, stopped: st.stopped,
       maxDrawdown: st.stats.maxDrawdown, longestLosses: st.stats.longestLosses,
-    });
+    }));
   }
 
   // New rounds arrived (oldest first). gap: rounds were missed before them.
@@ -361,6 +378,9 @@ function createMonitor({
   let fundsSeen = null;
   // The lowest balance read since the last round, and the last round's bets still waiting for it.
   let roundLow = null, openRound = null;
+  let liveMultiplier = {value: null, at: 0, source: '', method: 'page text'};
+  let visionMultiplier = {value: null, at: 0, source: '', method: 'on-screen OCR'};
+  let ocrProcess = null, ocrBuffer = '', ocrPending = null, ocrBusy = false, ocrLastQueuedAt = 0, ocrTimer = null, ocrSupported = process.platform === 'darwin' || process.platform === 'linux';
   let capture = {status: 'stopped', note: '', url: '', startedAt: 0, lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false};
   let context = null, stopping = false;
   // One lock for everything that types or clicks in the game, so two actions never overlap.
@@ -374,24 +394,106 @@ function createMonitor({
   let gamePage = null;
   const viewers = new Set();
   const writeFrame = (res, jpeg) => {
+    if (res.destroyed || res.writableNeedDrain) return;
     res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
     res.write(jpeg);
     res.write('\r\n');
   };
   let lastFrameAt = 0, grabbing = false;
+  function applyOcrValue(value) {
+    const next = Number.isFinite(value)
+      ? {value, at: Date.now(), source: capture.source || '', method: 'on-screen OCR'}
+      : {value: null, at: Date.now(), source: capture.source || '', method: 'on-screen OCR'};
+    const changed = visionMultiplier.value !== next.value || visionMultiplier.source !== next.source;
+    visionMultiplier = next;
+    if (changed) broadcast();
+  }
+  function parseTesseractTsv(text) {
+    let best = null;
+    for (const row of text.split(/\r?\n/).slice(1)) {
+      const cells = row.split('\t');
+      if (cells.length < 12 || !/^[x×]\s*\d|\d[\d.,]*\s*[x×]$/i.test(cells.slice(11).join('\t').trim())) continue;
+      const left = Number(cells[6]), top = Number(cells[7]), width = Number(cells[8]), height = Number(cells[9]), confidence = Number(cells[10]);
+      const cx = (left + width / 2) / 960, cy = (top + height / 2) / 540;
+      if (height < 24 || cx < 0.18 || cx > 0.86 || cy < 0.10 || cy > 0.90) continue;
+      const match = cells.slice(11).join(' ').match(/(?:[x×]\s*([0-9]{1,5}(?:[.,][0-9]{1,4})?)|([0-9]{1,5}(?:[.,][0-9]{1,4})?)\s*[x×])/i);
+      const value = match && Number((match[1] || match[2]).replace(',', '.'));
+      if (!Number.isFinite(value) || value < 1 || value > 1000000) continue;
+      const score = height * 4 + (1 - Math.abs(cx - 0.54)) * 12 + (Number.isFinite(confidence) ? confidence : 0) / 10;
+      if (!best || score > best.score) best = {value, score};
+    }
+    return best ? best.value : null;
+  }
+  function startVisionOcr() {
+    if (process.platform !== 'darwin' || ocrProcess || !ocrSupported) return;
+    const child = spawn('swift', [VISION_OCR_SCRIPT], {stdio: ['pipe', 'pipe', 'ignore']});
+    ocrProcess = child;
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      ocrBuffer += chunk;
+      let end;
+      while ((end = ocrBuffer.indexOf('\n')) >= 0) {
+        const line = ocrBuffer.slice(0, end); ocrBuffer = ocrBuffer.slice(end + 1);
+        try {
+          const result = JSON.parse(line);
+          applyOcrValue(result.value);
+        } catch {}
+        ocrBusy = false;
+        sendOcrFrame();
+      }
+    });
+    child.on('error', () => { if (ocrProcess === child) ocrProcess = null; ocrBusy = false; ocrSupported = false; broadcast(); });
+    child.on('close', () => { if (ocrProcess === child) ocrProcess = null; ocrBusy = false; });
+  }
+  function sendOcrFrame() {
+    if (ocrBusy || !ocrPending || !ocrSupported) return;
+    const throttle = Math.max(0, 180 - (Date.now() - ocrLastQueuedAt));
+    if (throttle) {
+      if (!ocrTimer) ocrTimer = setTimeout(() => { ocrTimer = null; sendOcrFrame(); }, throttle);
+      return;
+    }
+    const next = ocrPending; ocrPending = null; ocrBusy = true;
+    ocrLastQueuedAt = Date.now();
+    if (process.platform === 'darwin') {
+      if (!ocrProcess || ocrProcess.stdin.destroyed) { ocrBusy = false; return; }
+      ocrProcess.stdin.write(next.toString('base64') + '\n');
+      return;
+    }
+    const child = spawn('tesseract', ['stdin', 'stdout', '--psm', '11', 'tsv'], {stdio: ['pipe', 'pipe', 'ignore']});
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.on('error', () => { ocrSupported = false; ocrBusy = false; broadcast(); });
+    child.on('close', code => {
+      if (code === 0) applyOcrValue(parseTesseractTsv(output));
+      ocrBusy = false;
+      sendOcrFrame();
+    });
+    child.stdin.end(next);
+  }
+  function queueOcrFrame(jpeg) {
+    if (!ocrSupported || viewers.size === 0) return;
+    ocrPending = jpeg; // Keep only the newest frame if OCR is behind.
+    if (process.platform === 'darwin') startVisionOcr();
+    const wait = Math.max(0, 180 - (Date.now() - ocrLastQueuedAt));
+    if (!ocrTimer) ocrTimer = setTimeout(() => {
+      ocrTimer = null; sendOcrFrame();
+    }, wait);
+  }
   function pushFrame(jpeg) {
     frame = jpeg;
     lastFrameAt = Date.now();
+    queueOcrFrame(jpeg);
     for (const res of viewers) writeFrame(res, jpeg);
   }
   // Screencast only sends a picture when the page repaints. While someone is watching and no
   // picture came for 2 s (a still screen, or the game tab behind another tab), take a screenshot.
   const grabTimer = setInterval(async () => {
-    if (!viewers.size || !castPage || grabbing || Date.now() - lastFrameAt < 2000) return;
+    if (!viewers.size || !castPage || grabbing || Date.now() - lastFrameAt < 700) return;
     grabbing = true;
-    try { pushFrame(await castPage.screenshot({type: 'jpeg', quality: 60, timeout: 3000})); } catch {}
+    try { pushFrame(await castPage.screenshot({type: 'jpeg', quality: 45, scale: 'css', timeout: 1500})); } catch {}
     finally { grabbing = false; }
-  }, 1000);
+  }, 500);
 
   // Tells Chrome to treat the page as focused even when another tab or app is in front.
   async function keepFocused(page) {
@@ -414,7 +516,7 @@ function createMonitor({
         if (castSession === session) pushFrame(Buffer.from(data, 'base64'));
       });
       castSession = session;
-      await session.send('Page.startScreencast', {format: 'jpeg', quality: 60, maxWidth: 1000, maxHeight: 1000});
+      await session.send('Page.startScreencast', {format: 'jpeg', quality: 48, maxWidth: 960, maxHeight: 540, everyNthFrame: 1});
     } catch {}
     page.on('close', () => {
       if (castPage !== page || !context) return;
@@ -443,7 +545,7 @@ function createMonitor({
     const {values, times, gaps} = history, n = values.length;
     const start = Math.max(0, n - 200);
     return {
-      capture: {...capture, stale: isStale()},
+      capture: {...capture, stale: isStale(), ...(persistenceError ? {note: persistenceError} : {})},
       site: history.origin,
       count: n,
       latest: n ? values[n - 1] : null,
@@ -453,13 +555,19 @@ function createMonitor({
       recent: values.slice(start).map((v, i) => ({v, at: times[start + i], gap: gaps.includes(start + i)})).reverse(),
       session: sessionState(),
       autopilot: pilotState(),
+      liveMultiplier: Date.now() - liveMultiplier.at < 2500 && liveMultiplier.value !== null ? liveMultiplier : Date.now() - visionMultiplier.at < 2500 && visionMultiplier.value !== null ? visionMultiplier : null,
+      liveMultiplierOcrAvailable: ocrSupported,
       gameLogin: {saved: savedLoginName()},
       settings,
+      persistenceError,
     };
   }
   function broadcast() {
     const data = `data: ${JSON.stringify(state())}\n\n`;
-    for (const res of clients) res.write(data);
+    for (const res of clients) {
+      if (res.destroyed || res.writableNeedDrain) { res.destroy(); clients.delete(res); }
+      else if (!res.write(data)) { res.destroy(); clients.delete(res); }
+    }
   }
   const setCapture = patch => { capture = {...capture, ...patch}; broadcast(); };
   // Tell the page when a live capture goes quiet (game frozen, logged out, connection lost).
@@ -494,7 +602,7 @@ function createMonitor({
   function onPanel(p) {
     applyPanel(p);
     void maybeAutoCutOff();
-    void pilotTick();
+    void pilotTick().catch(e => { pilot.on = false; pilot.needCut = true; pilotSay('Autopilot stopped after an internal error. Check the game window.'); console.error(e.message); });
   }
 
   function onSnapshot(snap, frameUrl = '') {
@@ -526,13 +634,13 @@ function createMonitor({
       settleBets(live, liveGap, fresh.length);
       const next = AviatorMatch.append(history.values, history.gaps, fresh, gap, MAX_ROUNDS);
       const times = [...history.times, ...fresh.map(() => now)].slice(-next.captured.length);
-      store.append(history.origin, fresh, now, gap && history.values.length > 0);
+      persist(() => store.append(history.origin, fresh, now, gap && history.values.length > 0));
       history = {...history, values: next.captured, times, gaps: next.gaps};
       patch.lastRoundAt = now;
     }
     setCapture(patch);
     void maybeAutoCutOff();
-    void pilotTick();
+    void pilotTick().catch(e => { pilot.on = false; pilot.needCut = true; pilotSay('Autopilot stopped after an internal error. Check the game window.'); console.error(e.message); });
   }
 
   async function openBrowser() {
@@ -563,7 +671,7 @@ function createMonitor({
       session.autoBet = null;
       saveSession();
     }
-    store.setOrigin(url.origin);
+    persist(() => store.setOrigin(url.origin));
     setCapture({status: 'starting', note: 'Opening the game window…', url: url.href, startedAt: Date.now(), lastSnapshotAt: 0, lastRoundAt: 0, source: '', sawPlain: false});
     try {
       context = await openBrowser();
@@ -587,6 +695,17 @@ function createMonitor({
       onSnapshot(snap, src.frame ? src.frame.url() : '');
     });
     await ctx.exposeBinding('__aviatorPanel', (_src, p) => onPanel(p));
+    await ctx.exposeBinding('__aviatorLive', (src, p) => {
+      let source = ''; try { source = new URL(src.frame ? src.frame.url() : '').host; } catch {}
+      if (p && Number.isFinite(p.value) && p.value >= 1 && p.value <= 1000000) {
+        const changed = liveMultiplier.value !== p.value || liveMultiplier.source !== source;
+        liveMultiplier = {value: p.value, at: Date.now(), source, method: 'page text'};
+        if (changed) broadcast();
+      } else if (liveMultiplier.source === source && liveMultiplier.value !== null) {
+        liveMultiplier = {value: null, at: Date.now(), source, method: 'page text'};
+        broadcast();
+      }
+    });
     await ctx.addInitScript({path: STAY_VISIBLE_SCRIPT});
     await ctx.addInitScript({path: CAPTURE_SCRIPT});
     const page = ctx.pages()[0] || await ctx.newPage();
@@ -603,7 +722,7 @@ function createMonitor({
   }
 
   async function stop(note = 'Capture stopped.') {
-    castPage = null; castSession = null; frame = null; gamePage = null; panel = null; fundsSeen = null; roundLow = null; openRound = null;
+    castPage = null; castSession = null; frame = null; gamePage = null; panel = null; liveMultiplier = {value: null, at: 0, source: '', method: 'page text'}; visionMultiplier = {value: null, at: 0, source: '', method: 'on-screen OCR'}; ocrPending = null; fundsSeen = null; roundLow = null; openRound = null;
     wasStopped = false; lastCutOffAttemptAt = 0; cutOffFailures = 0;
     const ctx = context;
     context = null;
@@ -683,9 +802,9 @@ function createMonitor({
     fs.writeFileSync(loginKeyFile, k, {mode: 0o600});
     return k;
   }
-  function saveLogin(username, password) {
+  function saveLogin(username, password, origin) {
     const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', loginKey(true), iv);
-    const data = Buffer.concat([c.update(JSON.stringify({username, password}), 'utf8'), c.final()]);
+    const data = Buffer.concat([c.update(JSON.stringify({username, password, origin}), 'utf8'), c.final()]);
     fs.writeFileSync(loginFile, JSON.stringify({username, iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: data.toString('base64')}), {mode: 0o600});
   }
   function savedLogin() {
@@ -705,9 +824,12 @@ function createMonitor({
   }
   async function loginGame({username, password, remember, saved} = {}) {
     const fail = error => ({ok: false, error});
+    let approvedOrigin;
+    try { approvedOrigin = new URL(capture.url).origin; } catch {}
     if (saved === true) {
       const kept = savedLogin();
       if (!kept) return fail('No game login is saved on this server.');
+      if (!kept.origin || kept.origin !== approvedOrigin) return fail('Saved login belongs to another site or predates origin protection. Enter and save it again on the correct site.');
       ({username, password} = kept);
       remember = false;
     }
@@ -720,8 +842,12 @@ function createMonitor({
     busy = true;
     try {
       const wait = ms => new Promise(r => setTimeout(r, ms));
+      const initialPage = context.pages()[0];
+      if (initialPage) await initialPage.waitForURL(url => url.origin === approvedOrigin, {waitUntil: 'domcontentloaded', timeout: 5000}).catch(() => {});
       const findField = async () => {
         for (const page of context.pages()) for (const f of page.frames()) {
+          let origin; try { origin = new URL(f.url()).origin; } catch { continue; }
+          if (origin !== approvedOrigin) continue;
           const pw = f.locator('input[type="password"]:visible').first();
           if (await pw.count().catch(() => 0)) return {f, pw};
         }
@@ -738,17 +864,19 @@ function createMonitor({
         if (!form) return fail('The Login button was pressed, but no password box appeared. Use Open game window to log in by hand.');
       }
       const {f, pw} = form;
+      if (new URL(f.url()).origin !== approvedOrigin) return fail('Login destination changed. Nothing was entered.');
       const kinds = 'input:is([type="text"],[type="email"],[type="tel"],:not([type])):visible';
       let user = f.locator(`form:has(input[type="password"]) ${kinds}`).first();
       if (!await user.count().catch(() => 0)) user = f.locator(kinds).last();
       if (!await user.count().catch(() => 0)) return fail('The username box was not found on the game\'s login form. Use Open game window to log in by hand.');
       await user.fill(username, {timeout: 3000});
       await pw.fill(password, {timeout: 3000});
+      if (new URL(f.url()).origin !== approvedOrigin) return fail('Login destination changed. Submission refused.');
       await pw.press('Enter', {timeout: 3000});
       for (let i = 0; i < 20; i++) {
         await wait(400);
         if (!await findField()) {
-          if (remember === true) { try { saveLogin(username, password); } catch {} broadcast(); }
+          if (remember === true) { try { saveLogin(username, password, approvedOrigin); } catch {} broadcast(); }
           return {ok: true, saved: remember === true};
         }
       }
@@ -856,7 +984,7 @@ function createMonitor({
     bet = Math.round(Number(bet) * 100) / 100;
     target = Math.round(Number(target) * 100) / 100;
     if (!wantBet && !wantTarget) return fail('Enter a bet or a cash-out target to set.');
-    if (wantBet && !(bet > 0)) return fail('Enter a bet above ₹0.');
+    if (wantBet && !(Number.isFinite(bet) && bet > 0)) return fail('Enter a bet above ₹0.');
     if (wantTarget && !(target > 1 && target <= 1000)) return fail('Enter a cash-out target above 1×.');
     if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
     const now = panel && panel.slots[slot];
@@ -892,7 +1020,7 @@ function createMonitor({
         await type(box, target);
       }
       // The game may round or limit what was typed: what it shows afterwards is what counts.
-      await new Promise(r => setTimeout(r, 400));
+      await block.locator('.betSectionInput').waitFor({state: 'visible', timeout: 1500});
       const shown = await block.evaluate(b => {
         const num = el => { const n = el ? Number(String(el.value).replace(/[^0-9.]/g, '')) : NaN; return Number.isFinite(n) && el && /\d/.test(el.value) ? n : null; };
         const tag = b.querySelector('.autoPlayTagInput');
@@ -902,6 +1030,7 @@ function createMonitor({
       if (wantBet && shown.bet !== bet) wrong.push(`the game shows a bet of ${shown.bet === null ? 'nothing' : `₹${shown.bet}`}, not ₹${bet}`);
       if (wantTarget && (shown.target !== target || shown.autoCashOut === false)) wrong.push(`the game shows Auto Cash Out ${shown.autoCashOut === false ? 'OFF' : `at ${shown.target}×`}, not at ${target}×`);
       if (wrong.length) return {ok: false, shown, error: `Not set as asked: ${wrong.join('; ')}. Check the game window (it may have its own limits).`};
+      applyPanelFromFrame(await readFramePanel(frame));
       return {ok: true, slot, shown};
     } catch (e) {
       return fail(`The game's bet boxes could not be filled in (${String(e.message).split('\n')[0]}).`);
@@ -945,6 +1074,7 @@ function createMonitor({
         if (!before.hasAutoPlay) return fail('The Auto Play button was not found on this slot.');
         wantOn = on !== undefined ? on : !before.autoPlay;
         if (wantOn) {
+          if (isStale()) return fail('Capture is stale. New bets are blocked.');
           if (st.stopped) return fail('Stop-loss reached. You are done for today.');
           if (!(before.bet > 0)) return fail('Enter a bet above ₹0 in the game first.');
           if (before.bet > st.left) return fail(`That is more than the ₹${Math.round(st.left)} you have left today.`);
@@ -960,6 +1090,7 @@ function createMonitor({
       } else {
         if (!before.hasButton) return fail('The Bet button was not found on this slot.');
         if (kind === 'bet') {
+          if (isStale()) return fail('Capture is stale. New bets are blocked.');
           if (st.stopped) return fail('Stop-loss reached. You are done for today.');
           if (st.cooldownLeft) return fail(`After a loss, wait ${st.cooldownLeft} more round${st.cooldownLeft > 1 ? 's' : ''}.`);
           if (before.autoPlay === true) return fail('Auto Play is on for this bet in the game. Switch it off before pressing Bet.');
@@ -1040,6 +1171,7 @@ function createMonitor({
       const frame = await findGameFrame(1);
       if (!frame) return fail("The game's bet panel is not on screen.");
       let fp = await readFramePanel(frame);
+      if (!fp.slots.length || fp.slots.some(s => s.autoPlay === null)) return fail('Auto Play state cannot be verified. Check the game window.');
       const actions = [];
       const stopSlot = async (i, action, locator, disabled, still, done, stayedMsg) => {
         if (disabled) { actions.push({slot: i, action, ok: false, error: `The ${action === 'autoplay' ? 'Auto Play' : 'Cancel'} button is disabled.`}); return; }
@@ -1105,8 +1237,8 @@ function createMonitor({
   const dayOf = t => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const round2 = n => Math.round(n * 100) / 100;
   let pilot = {on: false, phase: 'off', startedAt: 0, stake: 0, base: 0, target: 0, debt: 0, streak: 0, pauseUntil: 0, lastTick: 0, engagedAt: 0, engageBalance: null, watchLow: null, firstCheck: false, fails: 0, needCut: false, note: '', log: []};
-  let pilotTicking = false;
-  const savePilot = () => { try { atomicWrite(pilotFile, JSON.stringify(pilotCfg)); } catch {} };
+  let pilotTicking = false, pilotEngaging = false;
+  const savePilot = () => persist(() => atomicWrite(pilotFile, JSON.stringify(pilotCfg)));
   // Days ended before the reason was stored: the reason is read back from its text.
   const kindOf = text => /loss limit|stop-loss/.test(text) ? 'loss' : /rounds were played/.test(text) ? 'rounds' : /minutes were played/.test(text) ? 'minutes'
     : /profit target/.test(text) ? 'profit' : /falling back/.test(text) ? 'kept' : /losses in a row/.test(text) ? 'streak' : 'loss';
@@ -1117,6 +1249,7 @@ function createMonitor({
     return pilotCfg.day;
   }
   function pilotSay(text) {
+    audit({type: 'autopilot', message: text});
     pilot.note = text;
     pilot.log.unshift({at: Date.now(), text});
     pilot.log.length = Math.min(pilot.log.length, 40);
@@ -1187,26 +1320,42 @@ function createMonitor({
   // Sets each bet and its target in the game and starts the game's Auto Play for it. A bet whose
   // Auto Play is already on is left as it is.
   async function pilotEngage() {
-    const a = pilotCfg.settings, left = Math.max(1, a.maxRounds - pilotDay().rounds);
-    const rounds = ROUND_CHOICES.find(n => n >= left) || ROUND_CHOICES.at(-1);
-    let r = {ok: true}, first = true;
-    for (const leg of pilotLegs()) {
-      const now = panel && panel.slots[leg.slot];
-      if (!now) return {ok: false, error: `Bet ${leg.slot + 1} is not on screen in the game.`};
-      if (now.autoPlay === true) continue;
-      r = await setGame({slot: leg.slot, bet: leg.stake, target: leg.target});
-      if (!r.ok) return r;
-      if (first) {
-        first = false;
-        pilot.engageBalance = panel ? panel.balance : null;
-        pilot.watchLow = pilot.engageBalance;
-        pilot.firstCheck = true;
+    if (pilotEngaging || busy) return {ok: true, deferred: true};
+    pilotEngaging = true;
+    try {
+      if (!pilot.on || isStale() || persistenceError) return {ok: false, error: persistenceError || 'Fresh capture is required.'};
+      const legs = pilotLegs();
+      const frame = await findGameFrame(legs.length);
+      if (!frame) return {ok: false, error: 'The game controls are not available.'};
+      const fp = await readFramePanel(frame);
+      const readiness = engagementState(fp.slots, legs);
+      if (!readiness.ok || readiness.deferred) return readiness;
+      const a = pilotCfg.settings, left = Math.max(1, a.maxRounds - pilotDay().rounds);
+      const rounds = ROUND_CHOICES.find(n => n >= left) || ROUND_CHOICES.at(-1);
+      let first = true;
+      for (const leg of legs) {
+        if (!pilot.on || isStale() || persistenceError) return {ok: false, error: 'Autopilot stopped before engagement completed.'};
+        if (fp.slots[leg.slot].autoPlay === true) continue;
+        let result = await setGame({slot: leg.slot, bet: leg.stake, target: leg.target});
+        if (!result.ok) return result;
+        // Read again immediately before enabling Auto Play; never accept stale slot settings.
+        const current = await readFramePanel(frame);
+        const slot = current.slots[leg.slot];
+        if (!slot || slot.bet !== leg.stake || slot.target !== leg.target || slot.autoCashOut !== true) return {ok: false, error: 'The game changed its bet or cash-out settings. Start refused.'};
+        if (slot.button !== 'bet' || slot.buttonDisabled) return {ok: true, deferred: true};
+        if (first) {
+          first = false;
+          pilot.engageBalance = current.balance;
+          pilot.watchLow = current.balance;
+          pilot.firstCheck = true;
+        }
+        if (!pilot.on || isStale() || persistenceError) return {ok: false, error: 'Autopilot stopped before Auto Play could start.'};
+        result = await clickGame({slot: leg.slot, action: 'autoplay', on: true, rounds});
+        if (!result.ok) return result;
       }
-      r = await clickGame({slot: leg.slot, action: 'autoplay', on: true, rounds});
-      if (!r.ok) return r;
-    }
-    pilot.engagedAt = Date.now();
-    return r;
+      pilot.engagedAt = Date.now();
+      return {ok: true};
+    } finally { pilotEngaging = false; }
   }
   async function pilotStop(reason, forToday, kind = '') {
     pilot.on = false;
@@ -1226,13 +1375,15 @@ function createMonitor({
       if (pilot.on) await pilotStop('you switched it off', false);
       return {ok: true, autopilot: pilotState()};
     }
-    if (pilot.on) return {ok: true, autopilot: pilotState()};
+    if (pilot.on || pilotEngaging) return {ok: true, autopilot: pilotState()};
     const a = pilotCfg.settings, day = pilotDay();
     if (day.stopped) return fail(`The autopilot is done for today (${day.stopped}). ${['rounds', 'minutes', 'profit', 'kept', 'streak'].includes(day.stoppedKind) ? 'Raise that limit in its settings to play more today.' : 'It can start again tomorrow.'}`);
     if (!context || capture.status !== 'live') return fail('Start live capture and open the game first.');
     const slot = panel && panel.slots[0], balance = panel ? panel.balance : null;
     if (!slot || balance === null) return fail("The game's bet panel or balance is not on screen yet.");
     if (panel.slots.some(x => x.autoPlay === true)) return fail('Auto Play is already on in the game. Stop it first.');
+    if (persistenceError) return fail(persistenceError);
+    if (isStale()) return fail('Capture is stale. Wait for fresh results before starting autopilot.');
     if (sessionState().stopped) return fail('Stop-loss reached. You are done for today.');
     const stake = a.betMode === 'percent' ? Math.max(1, Math.floor(balance * a.betValue / 100)) : round2(a.betValue);
     const split = a.plan === 'split', total = round2(stake + (split ? a.riderBet : 0));
@@ -1246,6 +1397,7 @@ function createMonitor({
       : `Autopilot on: ₹${stake} a round, cash out at ${a.target}×.`);
     const r = await pilotEngage();
     if (!r.ok) { await pilotStop(`it could not start the game's Auto Play (${r.error})`, false); return fail(r.error); }
+    if (r.deferred) { pilot.phase = 'waiting'; pilotSay('Waiting for the current bet to finish and the game controls to accept a new bet.'); }
     broadcast();
     return {ok: true, autopilot: pilotState()};
   }
@@ -1282,10 +1434,11 @@ function createMonitor({
     ];
     const now = a.plan === 'single' ? (a.recover ? 'recover' : 'single') : a.plan;
     return {ok: true, rounds: values.length, base, lossLimit: a.lossLimit, profitTarget: a.profitTarget,
-      plans: plans.map(p => ({key: p.key, label: p.label, current: p.key === now, ...Pilot.replaySummary(values, {...a, ...p.over}, base)}))};
+      limitations: ['Historical replay is approximate; placement delays and actual game acceptance are not modeled.', 'Elapsed capture time includes pauses; capture gaps invalidate a replay day.'],
+      plans: plans.map(p => ({key: p.key, label: p.label, current: p.key === now, ...Pilot.replaySummary(values, {...a, ...p.over}, base, {times: history.times, gaps: history.gaps})}))};
   }
   async function pilotTick() {
-    if (pilotTicking) return;
+    if (pilotTicking || pilotEngaging) return;
     pilotTicking = true;
     let changed = false;
     try {
@@ -1297,6 +1450,10 @@ function createMonitor({
       }
       if (!pilot.on) return;
       if (!live) { pilot.on = false; pilot.phase = 'off'; pilotSay('Autopilot off: live capture stopped.'); changed = true; return; }
+      if (isStale() || persistenceError) {
+        await pilotStop(persistenceError || 'capture is stale; check the game before restarting', false);
+        return;
+      }
       const a = pilotCfg.settings, day = pilotDay(), now = Date.now();
       if (pilot.phase === 'running') day.ms += now - pilot.lastTick;
       pilot.lastTick = now;
@@ -1358,12 +1515,13 @@ function createMonitor({
         const r = busy ? null : await autoCutOff({force: true}).catch(() => null);
         if (r && r.ok) pilot.needCut = false;
       }
-      if (pilot.on && !busy && !pilot.needCut && Date.now() - (pilot.lastTry || 0) > 800 && (pilot.phase === 'adjusting' || (pilot.phase === 'paused' && seen >= pilot.pauseUntil) || (pilot.phase === 'running' && !playing && now - pilot.engagedAt > 4000))) {
+      if (pilot.on && !busy && !pilot.needCut && Date.now() - (pilot.lastTry || 0) > 250 && (pilot.phase === 'waiting' || pilot.phase === 'adjusting' || (pilot.phase === 'paused' && seen >= pilot.pauseUntil) || (pilot.phase === 'running' && !playing && now - pilot.engagedAt > 4000))) {
         // The pause is over, or the game's Auto Play ran through its rounds: start it again.
         const resumed = pilot.phase === 'paused';
         pilot.lastTry = Date.now();
         const r = await pilotEngage();
-        if (r.ok) { pilot.phase = 'running'; pilot.fails = 0; pilot.lastTick = Date.now(); if (resumed) pilotSay('Pause over: betting again.'); }
+        if (r.ok && r.deferred) { pilot.phase = 'waiting'; }
+        else if (r.ok) { pilot.phase = 'running'; pilot.fails = 0; pilot.lastTick = Date.now(); if (resumed) pilotSay('Pause over: betting again.'); }
         else if (++pilot.fails >= 5) { await pilotStop(`the game's Auto Play could not be started (${r.error})`, false); return; }
         changed = true;
       }
@@ -1372,7 +1530,7 @@ function createMonitor({
       if (changed) { savePilot(); broadcast(); }
     }
   }
-  const pilotTimer = setInterval(() => { void pilotTick(); }, 2000);
+  const pilotTimer = setInterval(() => { void pilotTick().catch(e => { pilot.on = false; pilot.needCut = true; pilotSay('Autopilot stopped after an internal error. Check the game window.'); console.error(e.message); }); }, 250);
 
   async function maybeAutoCutOff() {
     if (!context || capture.status !== 'live') return;
@@ -1418,13 +1576,44 @@ function createMonitor({
       history.values.map((v, i) => `${i + 1},${v},${gaps.has(i) ? 1 : 0},${new Date(history.times[i] || 0).toISOString()}`).join('\n');
   }
 
-  const readJson = req => new Promise(resolve => {
-    let body = '';
-    req.on('data', c => { body += c; if (body.length > 10000) req.destroy(); });
-    req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { resolve({}); } });
+  const readJson = req => new Promise((resolve, reject) => {
+    let body = '', bytes = 0, tooLarge = false;
+    const bad = (message, statusCode = 400) => Object.assign(new Error(message), {statusCode});
+    req.on('data', c => {
+      bytes += c.length;
+      if (bytes > 10000) { tooLarge = true; reject(bad('Request body is too large.', 413)); }
+      else if (!tooLarge) body += c;
+    });
+    req.on('aborted', () => reject(bad('Request interrupted.')));
+    req.on('error', reject);
+    req.on('end', () => {
+      if (tooLarge) return;
+      try {
+        const value = JSON.parse(body || '{}');
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw bad('JSON body must be an object.');
+        resolve(value);
+      } catch (e) { reject(bad(e.statusCode ? e.message : 'Invalid JSON.')); }
+    });
   });
 
   const auth = createAuth(dataDir);
+  const connections = new Set();
+  function trackConnection(req, connection, role) {
+    const entry = {req, connection, role, token: identify(req).token};
+    connections.add(entry);
+    connection.on('close', () => connections.delete(entry));
+  }
+  function revokeConnections(token) {
+    for (const c of connections) {
+      let allowed = false;
+      try {
+        const who = identify(c.req);
+        allowed = !!who.user && (!c.role || who.user.role === c.role) && (!who.shared || who.authOn);
+      } catch {}
+      if ((token && c.token === token) || !allowed) { c.connection.destroy(); connections.delete(c); }
+    }
+  }
+  const authorizationTimer = setInterval(() => revokeConnections(), 1000);
   publicHost = String(publicHost || '').trim().toLowerCase();
 
   // Who is asking, by the name the monitor was reached under and the sign-in cookie.
@@ -1439,7 +1628,14 @@ function createMonitor({
     return {host, shared, known, authOn, token, user, originOk};
   }
 
-  const server = http.createServer(async (req, res) => {
+  const server = http.createServer((req, res) => {
+    void handleRequest(req, res).catch(e => {
+      if (res.headersSent) return res.destroy();
+      res.writeHead(e.statusCode || 500, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}).end(JSON.stringify({ok: false, error: e.statusCode ? e.message : 'Request failed. Check the server log.'}));
+      if (!e.statusCode) console.error('Monitor request failed:', e.message);
+    });
+  });
+  async function handleRequest(req, res) {
     // Reached as localhost by this computer's own browser, or under the shared name through the
     // web server in front. Other websites can't use it (checked by Host, and by Origin on every
     // action), and the shared name works only with accounts, never open.
@@ -1469,7 +1665,7 @@ function createMonitor({
       if (req.method === 'GET' && pathname === '/') { res.writeHead(302, {Location: '/login'}).end(); return; }
       return json(401, {ok: false, error: 'Sign in first.'});
     }
-    if (req.method === 'POST' && pathname === '/api/logout') { auth.logout(token); return json(200, {ok: true}, {'Set-Cookie': cookie('', 0)}); }
+    if (req.method === 'POST' && pathname === '/api/logout') { auth.logout(token); revokeConnections(token); return json(200, {ok: true}, {'Set-Cookie': cookie('', 0)}); }
     if (req.method === 'GET' && pathname === '/api/me') return json(200, {ok: true, auth: authOn, name: user.name, role: user.role, gameWindow: !!gameWindowPort && user.role === 'admin'});
     // A viewer can look at everything on the page and change nothing: not the capture, the
     // tracked bets, the settings, or anything in the game.
@@ -1487,7 +1683,10 @@ function createMonitor({
       return up.end();
     }
     if (req.method === 'POST') {
-      const send = r => res.writeHead(r.ok ? 200 : 400, {'Content-Type': 'application/json'}).end(JSON.stringify(r));
+      const send = r => {
+        audit({type: 'command', actor: user.name || 'local', route: pathname, ok: !!r.ok, ...(r.slot !== undefined ? {slot: r.slot} : {}), ...(r.action ? {action: r.action} : {})});
+        return res.writeHead(r.ok ? 200 : 400, {'Content-Type': 'application/json'}).end(JSON.stringify(r));
+      };
       if (pathname === '/api/start') return send(await start((await readJson(req)).url));
       if (pathname === '/api/stop') return send(await stop());
       if (pathname === '/api/clear') return send(clear());
@@ -1519,6 +1718,7 @@ function createMonitor({
       if (pathname === '/api/days') return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify({ok: true, days: store.days()}));
       if (pathname === '/preview') {
         res.writeHead(200, {'Content-Type': 'multipart/x-mixed-replace; boundary=frame', 'Cache-Control': 'no-store', Connection: 'keep-alive'});
+        trackConnection(req, res);
         viewers.add(res);
         if (frame) writeFrame(res, frame);
         req.on('close', () => viewers.delete(res));
@@ -1527,6 +1727,7 @@ function createMonitor({
       if (pathname === '/events') {
         res.writeHead(200, {'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive'});
         res.write(`data: ${JSON.stringify(state())}\n\n`);
+        trackConnection(req, res);
         clients.add(res);
         req.on('close', () => clients.delete(res));
         return;
@@ -1540,13 +1741,15 @@ function createMonitor({
       }
     }
     res.writeHead(404).end('not found');
-  });
+  }
 
   // The game window's live connection (a WebSocket to the noVNC viewer): admins only, and only
   // from the monitor's own page.
   const tunnels = new Set();
   server.on('upgrade', (req, socket, head) => {
-    const {known, shared, authOn, user, originOk} = identify(req);
+    let identity;
+    try { identity = identify(req); } catch { socket.destroy(); return; }
+    const {known, shared, authOn, user, originOk} = identity;
     // noVNC builds this address differently from version to version: /vnc/websockify, or the
     // same resolved against its own page (/vnc/vnc/websockify), or from the root (/websockify).
     const pathname = String(req.url).split('?')[0];
@@ -1562,19 +1765,23 @@ function createMonitor({
       socket.pipe(up).pipe(socket);
     });
     const end = () => { tunnels.delete(socket); socket.destroy(); up.destroy(); };
+    trackConnection(req, socket, 'admin');
     tunnels.add(socket);
     socket.on('error', end); socket.on('close', end);
     up.on('error', end); up.on('close', end);
   });
 
   // Keep event streams open through idle proxies and sleeping laptops.
-  const ping = setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 20000);
+  const ping = setInterval(() => { for (const res of clients) { if (!res.write(': ping\n\n')) res.destroy(); } }, 20000);
 
   return {
     listen: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => resolve(server.address().port)); }),
     close: async () => {
       clearInterval(ping);
+      clearInterval(authorizationTimer);
       clearInterval(grabTimer);
+      if (ocrTimer) clearTimeout(ocrTimer);
+      if (ocrProcess) { ocrProcess.stdin.end(); ocrProcess.kill(); ocrProcess = null; }
       clearInterval(staleTimer);
       clearInterval(pilotTimer);
       // Close the game window first (it sends a last update), then the open pages.

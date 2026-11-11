@@ -4,7 +4,8 @@
 // computer only.
 const crypto = require('crypto');
 const path = require('path');
-const {atomicWrite, readJson} = require('./store.js');
+const fs = require('fs');
+const {atomicWrite} = require('./store.js');
 
 const ROLES = ['admin', 'viewer'];
 const SESSION_MS = 7 * 24 * 3600 * 1000;
@@ -12,9 +13,21 @@ const MAX_FAILS = 5, LOCK_MS = 10 * 60 * 1000;
 
 function createAuth(dataDir) {
   const file = path.join(dataDir, 'users.json');
+  const requiredFile = path.join(dataDir, 'auth-required');
+  let configured = fs.existsSync(file) || fs.existsSync(requiredFile);
+  if (fs.existsSync(file) && !fs.existsSync(requiredFile)) atomicWrite(requiredFile, 'Account database required.\n');
   const users = () => {
-    const list = readJson(file, []);
-    return Array.isArray(list) ? list.filter(u => u && typeof u.name === 'string' && ROLES.includes(u.role) && u.salt && u.hash) : [];
+    try {
+      const list = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!Array.isArray(list) || list.some(u => !u || !/^[a-z0-9_.-]{2,32}$/.test(u.name) || !ROLES.includes(u.role) || !/^[a-f0-9]{32}$/.test(u.salt) || !/^[a-f0-9]{64}$/.test(u.hash))) throw new Error('invalid accounts');
+      configured = true;
+      return list;
+    } catch (e) {
+      if (e.code === 'ENOENT' && !configured) return [];
+      const error = new Error('Account database unavailable. Restore data/users.json; access is locked.');
+      error.statusCode = 503;
+      throw error;
+    }
   };
   const hash = (password, salt) => crypto.scryptSync(String(password), salt, 32).toString('hex');
   const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -25,6 +38,7 @@ function createAuth(dataDir) {
     if (!ROLES.includes(role)) return {ok: false, error: 'The role is admin or viewer.'};
     if (String(password || '').length < 8) return {ok: false, error: 'Use a password of at least 8 characters.'};
     const salt = crypto.randomBytes(16).toString('hex');
+    atomicWrite(requiredFile, 'Account database required.\n');
     atomicWrite(file, JSON.stringify([...users().filter(u => u.name !== name), {name, role, salt, hash: hash(password, salt)}], null, 1));
     return {ok: true, name, role};
   }
@@ -46,7 +60,7 @@ function createAuth(dataDir) {
     name = String(name || '').trim().toLowerCase();
     const user = users().find(u => u.name === name);
     // The same work is done for an unknown name, so the answer takes equally long either way.
-    const good = same(hash(password, user ? user.salt : '00'), user ? user.hash : hash('', '01')) && !!user;
+    const good = same(hash(password, user ? user.salt : '00'), user ? user.hash : '0'.repeat(64)) && !!user;
     if (!good) {
       const n = f && f.until > now ? f.n + 1 : 1;
       fails.set(address, {n, until: now + LOCK_MS});
@@ -55,7 +69,7 @@ function createAuth(dataDir) {
     fails.delete(address);
     for (const [t, s] of sessions) if (s.until < now) sessions.delete(t);
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, {name, until: now + SESSION_MS});
+    sessions.set(token, {name, hash: user.hash, until: now + SESSION_MS});
     return {ok: true, token, name, role: user.role, maxAge: SESSION_MS / 1000};
   }
   // Who a session token belongs to. The account is looked up each time, so removing an account
@@ -65,7 +79,7 @@ function createAuth(dataDir) {
     if (!s) return null;
     if (s.until < Date.now()) { sessions.delete(token); return null; }
     const user = users().find(u => u.name === s.name);
-    return user ? {name: user.name, role: user.role} : null;
+    return user && user.hash === s.hash ? {name: user.name, role: user.role} : null;
   }
   const logout = token => { sessions.delete(token); };
 

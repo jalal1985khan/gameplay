@@ -53,8 +53,7 @@ over 50 bets). Pick how you exit:
 
 Place the bet yourself in the game window, then press the button before the plane takes off. After a loss the button hides for 3 rounds;
 once you are down a quarter of your money it hides for the rest of the day. Both can be changed
-with the gear icon (⚙ Settings, top right): pause 0–10 rounds, stop-loss 10%, 25%, 50% or all. The monitor never
-places bets itself.
+with the gear icon (⚙ Settings, top right): pause 0–10 rounds, stop-loss 10%, 25%, 50% or all. The manual tracker records bets you place. The game controls and autopilot described below can place real-money bets.
 
 **My results** (right side, under the live view): today's bets, wins, losses, net result, win
 rate, how much of the stop-loss is used, and a row per bet (time, bet, exit, where the plane
@@ -99,7 +98,7 @@ If the game window is closed, click Start live capture again.
 
 ## What it does and doesn't do
 
-- Reads the game's results list from the page, including the game frame. It never reads your password. It types in the game only when you press **Set Bet in the game** (the bet amount and the Auto Cash Out target).
+- Reads the game's results list from the page, including the game frame. Admin-requested login can enter credentials; the game controls and autopilot can enter amounts and targets and place real-money bets.
 - `POST /api/autopilot` (`{on}`) starts or stops the autopilot, and `POST /api/autopilot/settings` saves its six limits: daily loss limit, profit target, bet (fixed or a share of the balance), cash-out target, longest session (rounds and minutes), and what to do after losses in a row (pause or stop). The autopilot sets the bet and target in the game, runs the game's own Auto Play on bet 1, counts every result, and stops for the day at the first limit reached; after that it will not start again until the next day. Three ways to cash out: always at one number; two bets each round, a secure part on bet 1 at the lowest cash-out and a rider on bet 2 at the highest; or one bet whose cash-out is raised after losses, between the lowest and highest set, just enough for one win to cover the open losses. With "raise the bet to win the loss back" switched on (off by default), the bet after a loss is sized so one win at the recovery cash-out covers the open losses plus a normal win, never above the largest bet set, the balance, or what is left before the loss limit. It decides when to stop, never which rounds to play: rounds are random.
 - `POST /api/autopilot/auto` (`{budget, loss}`) works the autopilot's settings out from the day's budget and the most the person accepts to lose: 20 equal bets fit in the loss limit (never more than 1% of the budget), the cash-out is raised after losses between 1.5× and 3×, the profit target is half the loss limit, and a good day is protected. `GET /api/autopilot/replay` plays each way to cash out over the captured rounds as many separate days (the rules are shared in `lib/pilot.js`) and reports how the days ended. It shows what the rules did on past rounds, not what comes next.
 - `POST /api/game/login` (`{username, password}`, admins only) types them into the game site's own login form in the game window and submits it. They are used for that one call and never logged or sent back. With `remember: true` a login that worked is kept on the server, encrypted (`data/game-login.json`, key in `data/game-login.key`, both readable by the monitor's user only); `{saved: true}` logs in with it, and `POST /api/game/login/forget` removes it. Anyone who can read both files, or sign in as an admin, can use that login. If the site asks for more (a code, a puzzle), log in by hand through **Open game window**.
@@ -146,7 +145,7 @@ does this), an admin sees **Open game window** above the live view: it opens the
 window in a new tab, to log in to the game or use it. It goes through the monitor, behind the
 same sign-in, and a view-only account is refused. Whoever can open it controls the browser that
 is logged in to the game, so give admin accounts only to people you would give the game account
-to. The monitor never stores the game password; let the browser in that window remember it.
+to. Explicitly remembered game credentials are encrypted locally and restricted to the original login origin. Existing saved credentials without an origin must be entered and saved again.
 
 
 ## Running it on a server
@@ -164,3 +163,22 @@ sudo bash setup.sh --domain monitor.example.com --email you@example.com   # also
 Without `--domain` nothing is opened to the internet: you reach the monitor and the game window
 through an SSH tunnel, which the script prints at the end. The folder must not be inside a web
 server's public folder (such as `/var/www`); the script refuses to continue there.
+
+## Reliability and security changes
+
+Autopilot responds to control changes and checks again every 250 ms. If a bet is pending, in flight, or disabled it shows Waiting and starts only when the slot is available. It verifies the amount and Auto Cash Out before enabling Auto Play and refuses to adopt active settings that differ. This improves execution reliability, not the probability of winning. No historical pattern is used to select a winning round. Actual game acceptance and network latency remain outside the monitor's control.
+
+Stale capture stops autopilot and attempts to disable the game's Auto Play. New bets remain blocked while capture is stale. A failed data write locks betting until storage is repaired and the monitor is restarted. A failed stop attempt still requires checking the actual game window.
+
+Invalid JSON bodies return errors instead of crashing the server. Corrupt or missing configured account databases lock access. Password replacement revokes old sessions; logout closes live streams immediately, and other account changes are checked at one-second intervals. Slow video clients drop outdated frames; slow event clients disconnect and can reconnect.
+
+Round logs separate interrupted final records from new writes and load only the requested tail. Historical replay stops across missing-round gaps and uses available timestamps for the time limit; it remains approximate, including pause time in elapsed capture time.
+
+Saved game login is restricted to the original origin. Third-party login frames are deliberately not filled automatically; use the game window for those sites.
+
+Command outcomes and autopilot transitions are recorded in `data/actions.ndjson` without request bodies or credentials. Archive this log periodically. The 97% RTP probability model is an assumption to verify against the selected provider, not a measurement or guarantee for arbitrary game sites.
+
+
+### Live preview and multiplier overlay
+
+The preview requests each browser screencast frame at a compact 960×540 JPEG size to reduce transfer delay. The live multiplier is read from page text when available. macOS uses Apple Vision OCR for games that draw the multiplier into the game image; Ubuntu installs Tesseract OCR when `setup.sh` runs. OCR is throttled to at most about five frames per second to limit CPU use. If the provider changes its game layout or renders the value too faintly, the overlay can remain blank; completed rounds still appear in the captured-round list.

@@ -187,6 +187,8 @@
   .preview h2{margin-top:0}
   .screen{position:relative;background:#0a0c12;border:1px solid var(--border);border-radius:10px;overflow:hidden;aspect-ratio:16/10}
   .screen img{display:block;width:100%;height:100%;object-fit:contain}
+  .live-multiplier{position:absolute;z-index:2;left:12px;top:12px;padding:7px 12px;border-radius:10px;background:#111b;color:#fff;font-size:25px;font-weight:800;text-shadow:0 1px 4px #000;pointer-events:none}
+  .live-multiplier[hidden]{display:none}
   .screen .blank{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;color:var(--muted);font-size:14px}
   .preview p{color:var(--muted);font-size:12px;margin:8px 0 0}
   .preview{max-height:calc(100vh - 32px);overflow:auto}
@@ -359,7 +361,7 @@
 
   <div class="layout">
   <div>
-  <h2><span>Bet helper <small class="empty">real odds, your risk, and a bet check</small></span></h2>
+  <h2><span>Bet helper <small class="empty">assumed 97% RTP model, your risk, and a bet check</small></span></h2>
   <div class="panel">
     <div class="helper-in">
       <div><label for="budget">Money you are ready to lose today (₹)</label><input id="budget" type="number" min="1" step="1" value="1000"></div>
@@ -449,8 +451,8 @@
       </div>
       <div class="gmsg" id="gMsg"></div>
     </form>
-    <div class="screen"><img id="screen" alt="Live view of the game window" hidden><div class="blank" id="screenBlank">The game window appears here once capture starts.</div></div>
-    <p>A picture of what the game window shows right now. Log in and play in that window itself; this view is for watching only.</p>
+    <div class="screen"><div class="live-multiplier" id="liveMultiplier" hidden aria-live="polite"></div><img id="screen" alt="Live view of the game window" hidden><div class="blank" id="screenBlank">The game window appears here once capture starts.</div></div>
+    <p>A live preview. The multiplier is read from page text, or from the image on macOS and configured Ubuntu servers. Log in and play in that window itself; this view is for watching only.</p>
 
     <h2 class="results-title"><span>My results <small class="empty">today's tracked bets</small></span><span><a id="betsCsv">Download</a></span></h2>
     <div class="panel results">
@@ -518,11 +520,11 @@
   function render() {
     if (!state) return;
     const c = state.capture, running = ['starting', 'waiting', 'live'].includes(c.status);
-    $('status').className = `status ${localError ? 'error' : c.stale ? 'stale' : c.status}`;
+    $('status').className = `status ${localError || state.persistenceError ? 'error' : c.stale ? 'stale' : c.status}`;
     $('diagBtn').hidden = !(c.status === 'waiting' && Date.now() - c.startedAt > 30000 || c.stale);
     renderRemind(c, running);
     if (typeof AnalysisUI !== 'undefined') { AnalysisUI.update(); AnalysisUI.updateSession(); }
-    $('statusText').textContent = localError || statusText(c);
+    $('statusText').textContent = localError || state.persistenceError || statusText(c);
     if (!localError && c.status === 'waiting' && c.sawPlain) {
       const warn = document.createElement('small');
       warn.textContent = 'This page shows numbers without "x" (sports odds), which are not recorded. Open the Aviator game in the game window.';
@@ -532,6 +534,9 @@
     renderResults(); // Not inside renderHelper, which stops early on empty inputs.
     renderAlarm();
     renderScreen(running);
+    const live = state.liveMultiplier, liveNode = $('liveMultiplier');
+    if (live && Number.isFinite(live.value)) { liveNode.textContent = `LIVE ${fmt(live.value)}×`; liveNode.title = `Read by ${live.method || 'game page text'}`; liveNode.hidden = false; }
+    else { liveNode.textContent = !running ? 'Live multiplier appears when readable' : state.liveMultiplierOcrAvailable === false ? 'Live multiplier image reader unavailable' : 'Reading live multiplier…'; liveNode.hidden = !running; }
     $('toggle').textContent = running ? 'Stop capture' : 'Start live capture';
     $('toggle').className = running ? 'stop' : '';
     $('toggle').disabled = busy;
@@ -613,8 +618,8 @@
   $('screen').addEventListener('error', () => { screenOn = false; });
 
   // ---- Bet helper ----
-  // The game's published math: a round reaches x with probability 0.97 / x, every round, whatever
-  // came before. Nothing here predicts a round; it shows the real odds, the risk of the bet amount
+  // Assumed probability model; verify against the selected provider: a round reaches x with probability 0.97 / x, every round, whatever
+  // came before. Nothing here predicts a round; it shows model odds, the risk of the bet amount
   // you choose, and checks bets you place yourself.
   const RTP = 0.97;
   const stopShare = () => (state && state.settings ? state.settings.stopLossShare : 0.25);
@@ -698,7 +703,7 @@
     const a = p.settings, live = state.capture.status === 'live';
     const bet = a.betMode === 'percent' ? `${a.betValue}% of the game balance` : money(a.betValue);
     const after = a.lossAction === 'stop' ? 'stop for today' : `pause ${a.pauseRounds} round${a.pauseRounds > 1 ? 's' : ''}`;
-    const status = p.on ? (p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : p.phase === 'adjusting' ? `Changing the bet to ${money(p.stake)} at ${p.target}×…` : a.plan === 'split' ? `Running: ${money(p.stake)} at ${a.minTarget}× and ${money(a.riderBet)} at ${a.maxTarget}×, every round.` : `Running: ${money(p.stake)} this round, cash out at ${p.target}×.${p.debt > 0 ? ` ${money(p.debt)} to win back.` : ''}`)
+    const status = p.on ? (p.phase === 'waiting' ? 'Waiting for the current bet to finish and the game controls to accept a new bet.' : p.phase === 'paused' ? `Paused for ${p.pauseLeft} more round${p.pauseLeft === 1 ? '' : 's'}.` : p.phase === 'adjusting' ? `Changing the bet to ${money(p.stake)} at ${p.target}×…` : a.plan === 'split' ? `Running: ${money(p.stake)} at ${a.minTarget}× and ${money(a.riderBet)} at ${a.maxTarget}×, every round.` : `Running: ${money(p.stake)} this round, cash out at ${p.target}×.${p.debt > 0 ? ` ${money(p.debt)} to win back.` : ''}`)
       : p.day.stopped ? `Done for today: ${p.day.stopped}. ${p.day.final ? 'It can start again tomorrow.' : 'To play more today, raise that limit under Change autopilot settings.'}`
       : live ? 'Off. Nothing is bet until you start it.' : 'Off. Start live capture and open the game first.';
     const html = `<ul class="plist">
@@ -712,7 +717,7 @@
         <li${a.plan === 'single' ? '' : ' hidden'}>After a loss: ${a.recover ? `<b>raises the bet</b> to win it back, up to <b>${money(a.maxBet)}</b>, cashing out at <b>${a.recoverTarget}×</b>` : '<b>keeps the same bet</b>'}</li>
       </ul>
       <button type="button" id="pilotGo" class="bet${p.on ? ' halt' : ''}"${!p.on && (p.day.stopped || !live) ? ' disabled' : ''}>${p.on ? 'Stop autopilot' : 'Start autopilot'}</button>
-      <div class="pstatus ${p.on ? (p.phase === 'paused' ? 'wait' : 'good') : p.day.stopped ? 'bad' : ''}">${status}</div>
+      <div class="pstatus ${p.on ? (['paused', 'waiting'].includes(p.phase) ? 'wait' : 'good') : p.day.stopped ? 'bad' : ''}">${status}</div>
       <div class="ptoday">Autopilot today: <b class="${p.day.net > 0 ? 'good' : p.day.net < 0 ? 'bad' : ''}">${signed(p.day.net)}</b> · ${p.day.rounds} round${p.day.rounds === 1 ? '' : 's'} · ${p.day.minutes} min</div>
       <div class="setmsg bad" id="pilotMsg">${pilotError}</div>
       ${!p.on && p.day.rounds ? '<button type="button" id="pilotNewDay" class="secondary-btn">Start a new day</button>' : ''}
@@ -749,7 +754,7 @@
     const r = await fetch('/api/autopilot/replay').then(x => x.json()).catch(() => ({ok: false, error: 'No answer from the monitor.'}));
     if (!r.ok) { out.innerHTML = `<p class="fine bad">${r.error}</p>`; return; }
     const pc = v => `${Math.round(v * 100)}%`;
-    out.innerHTML = `<p class="fine">Each way to cash out, played over your ${r.rounds} captured rounds as many separate days (${money(r.base)} bet, stop at ${money(r.lossLimit)} lost or ${money(r.profitTarget)} won). Days overlap, so read it as a rough picture.</p>
+    out.innerHTML = `<p class="fine">Each way to cash out, played over your ${r.rounds} captured rounds as many separate days (${money(r.base)} bet, stop at ${money(r.lossLimit)} lost or ${money(r.profitTarget)} won). Days overlap, so read it as a rough picture. Capture gaps end a replay day. Capture timestamps approximate the time limit, including pauses; actual game acceptance and placement delays are not modeled.</p>
       <div class="table-scroll"><table class="ptable"><thead><tr><th>Way to cash out</th><th>Days ending at profit</th><th>Days ending at the loss limit</th><th>Average day</th><th>Worst day</th></tr></thead><tbody>${
         r.plans.map(p => !p.days ? `<tr><td>${p.label}</td><td colspan="4">not enough rounds</td></tr>` : `<tr${p.current ? ' class="cur"' : ''}><td>${p.label}${p.current ? ' <span class="tag">set now</span>' : ''}</td><td>${pc(p.profit + p.kept)}</td><td>${pc(p.loss)}</td><td class="${p.average > 0 ? 'good' : p.average < 0 ? 'bad' : ''}">${signed(p.average)}</td><td class="bad">${signed(p.worst)}</td></tr>`).join('')
       }</tbody></table></div>
@@ -887,7 +892,7 @@
   }
 
   function renderBetBox(ses, stake, win, p) {
-    $('betLine').innerHTML = `Win chance <b>${pct(p)}</b> · if it reaches ${target}×: <b class="good">+${money(win)}</b> · if it crashes first: <b class="bad">−${money(stake)}</b>`;
+    $('betLine').innerHTML = `Model chance <b>${pct(p)}</b> · if it reaches ${target}×: <b class="good">+${money(win)}</b> · if it crashes first: <b class="bad">−${money(stake)}</b>`;
     for (const b of $('modes').children) { b.classList.toggle('on', b.dataset.mode === mode); b.setAttribute('aria-checked', b.dataset.mode === mode); }
     $('modeHelp').textContent = mode === 'auto'
       ? `In the game, turn on Auto Cash Out at ${target.toFixed(2)}. The next round decides the bet: a win if the plane reaches ${target}×.`

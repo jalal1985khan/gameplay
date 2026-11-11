@@ -34,13 +34,21 @@ function stopReason(a, d) {
 
 // One day of the autopilot played over rounds that already happened, from values[start].
 // Returns {net, rounds, kind}, or null when the rounds ran out before the day ended.
-function replayDay(values, a, base, start) {
+function replayDay(values, a, base, start, {times = [], gaps = []} = {}) {
+  const startedAt = times[start];
+  let previous = start;
   const rider = a.plan === 'split' ? a.riderBet : 0;
   let net = 0, rounds = 0, streak = 0, debt = 0, peak = 0, i = start;
   let {stake, target} = planNext(a, base, 0);
   const first = stopReason(a, {net, rounds, ms: 0, streak, peak, roundCost: base + rider});
   if (first) return {net, rounds, kind: first.kind};
   while (i < values.length) {
+    // A replay day cannot bridge unknown rounds, even when a pause skipped over them.
+    if (gaps.some(g => g > previous && g <= i)) return null;
+    const elapsed = startedAt > 0 && times[i] > 0 ? Math.max(0, times[i] - startedAt) : 0;
+    const before = stopReason(a, {net, rounds, ms: elapsed, streak, peak, roundCost: stake + rider});
+    if (before) return {net, rounds, kind: before.kind};
+    previous = i;
     const v = values[i++];
     const result = round2((v >= target ? stake * (target - 1) : -stake) + (rider ? (v >= a.maxTarget ? rider * (a.maxTarget - 1) : -rider) : 0));
     net = round2(net + result);
@@ -59,10 +67,10 @@ function replayDay(values, a, base, start) {
 }
 
 // Many such days, each starting at a different captured round, summed up.
-function replaySummary(values, a, base) {
+function replaySummary(values, a, base, options = {}) {
   const step = Math.max(5, Math.floor(values.length / 300));
   const days = [];
-  for (let s = 0; s < values.length; s += step) { const d = replayDay(values, a, base, s); if (d) days.push(d); }
+  for (let s = 0; s < values.length; s += step) { const d = replayDay(values, a, base, s, options); if (d) days.push(d); }
   if (!days.length) return {days: 0};
   const nets = days.map(d => d.net).sort((x, y) => x - y);
   const share = kinds => days.filter(d => kinds.includes(d.kind)).length / days.length;

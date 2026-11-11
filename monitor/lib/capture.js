@@ -5,7 +5,7 @@
   if (window.__aviatorCapture) return;
   window.__aviatorCapture = true;
 
-  let scanTimer = 0, strip = null, lastKey = null;
+  let scanTimer = 0, strip = null, lastKey = null, multiplierTimer = 0;
   const seen = new WeakSet();
 
   // A multiplier label such as "2.15x", "x1,204.50" or "1.00". It needs the x/× marker or exactly
@@ -51,6 +51,31 @@
     if (r && r.marked) return strip;
     return strip = findStrip();
   }
+
+  // Read a text-rendered live multiplier when the provider exposes it in the DOM. Canvas-only
+  // games need provider-specific OCR and cannot be read reliably from page text.
+  function scanLiveMultiplier() {
+    multiplierTimer = 0;
+    if (!document.body || typeof window.__aviatorLive !== 'function') return;
+    let best = null, score = 0;
+    for (const el of document.body.querySelectorAll('body *')) {
+      if (el.children.length || !visible(el) || (strip && strip.contains(el))) continue;
+      const r = read(el.textContent);
+      if (!r || !r.marked) continue;
+      const style = getComputedStyle(el), size = parseFloat(style.fontSize) || 0;
+      if (size < 20) continue;
+      const box = el.getBoundingClientRect();
+      const cx = (box.left + box.right) / 2 / Math.max(1, innerWidth);
+      const cy = (box.top + box.bottom) / 2 / Math.max(1, innerHeight);
+      if (cx < 0.2 || cx > 0.85 || cy < 0.15 || cy > 0.9) continue;
+      const candidate = size + (1 - Math.abs(cx - 0.55)) * 8 + (1 - Math.abs(cy - 0.55)) * 5;
+      if (candidate > score) { best = r.n; score = candidate; }
+    }
+    window.__aviatorLive({value: best}).catch(() => {});
+  }
+  const queueLiveMultiplier = () => {
+    if (!multiplierTimer) multiplierTimer = setTimeout(scanLiveMultiplier, 75);
+  };
   // For the monitor's diagnostics: every list in this frame that looks like results.
   window.__aviatorCandidates = () => {
     const out = [];
@@ -87,7 +112,7 @@
   // (on/off and target) and Auto Play. Class names are those of Broplay's Aviator (pokgaming).
   const money = t => { const n = Number(String(t || '').replace(/[^0-9.]/g, '')); return Number.isFinite(n) && /\d/.test(String(t)) ? n : null; };
   const isOn = el => !!el && /(^|[\s-])(active|on|checked|enabled|selected)([\s-]|$)/i.test(typeof el.className === 'string' ? el.className : '');
-  let lastPanel = '';
+  let lastPanel = '', lastPanelAt = 0, panelTimer = 0;
   function readPanel() {
     if (!document.body || typeof window.__aviatorPanel !== 'function') return;
     const balanceEl = document.querySelector('.userBalanceMoney');
@@ -113,8 +138,9 @@
     });
     const panel = {balance: balanceEl ? money(balanceEl.textContent) : null, slots};
     const key = JSON.stringify(panel);
-    if (key === lastPanel) return;
+    if (key === lastPanel && Date.now() - lastPanelAt < 900) return;
     lastPanel = key;
+    lastPanelAt = Date.now();
     window.__aviatorPanel(panel).catch(() => {});
   }
   setInterval(readPanel, 1000);
@@ -123,8 +149,13 @@
   const queueScan = () => { if (!scanTimer) scanTimer = setTimeout(scan, 500); };
 
   const start = () => {
-    new MutationObserver(queueScan).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
+    new MutationObserver(() => {
+      queueScan();
+      queueLiveMultiplier();
+      if (!panelTimer) panelTimer = setTimeout(() => { panelTimer = 0; readPanel(); }, 75);
+    }).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
     queueScan();
+    queueLiveMultiplier();
   };
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);
 })();
